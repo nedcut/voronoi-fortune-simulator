@@ -4,6 +4,10 @@ An interactive, educational visualization of **Fortune's algorithm** for computi
 
 ![Voronoi Diagram](https://img.shields.io/badge/algorithm-Fortune's_Sweep-38bdf8?style=flat-square) ![React](https://img.shields.io/badge/React-18-61dafb?style=flat-square) ![Vite](https://img.shields.io/badge/Vite-6-646cff?style=flat-square)
 
+## Live Demo
+
+**[Try it in your browser](https://nedcut.github.io/voronoi-fortune-simulator/)** — no install required.
+
 ## Features
 
 - **Click to place** Voronoi sites — right-click to remove
