@@ -5,7 +5,7 @@ import VoronoiVisualizer from './VoronoiVisualizer.jsx'
 const style = document.createElement('style')
 style.textContent = `
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #080d19; overflow-x: hidden; }
+  body { overflow-x: hidden; transition: background 0.2s; }
 `
 document.head.appendChild(style)
 
