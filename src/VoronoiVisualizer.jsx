@@ -10,6 +10,16 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
  */
 
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+function normalizeWheelDelta(delta, deltaMode) {
+  if (deltaMode === 1) return delta * 18;
+  if (deltaMode === 2) {
+    const page = typeof window === "undefined" ? 800 : window.innerHeight * 0.85;
+    return delta * page;
+  }
+  return delta;
+}
 
 function circumcenter(a, b, c) {
   const D = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
@@ -130,7 +140,304 @@ function mergeDebugEdges(edges) {
   });
 }
 
+function roundCoord(value, places = 1) {
+  const scale = 10 ** places;
+  return Math.round(value * scale) / scale;
+}
+
+function nearlySamePoint(a, b, eps = 1e-4) {
+  return Math.hypot(a.x - b.x, a.y - b.y) <= eps;
+}
+
+function polygonArea(points) {
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return area / 2;
+}
+
+function dedupePolygon(points, eps = 1e-4) {
+  const deduped = [];
+  for (const point of points) {
+    if (!deduped.length || !nearlySamePoint(deduped[deduped.length - 1], point, eps)) {
+      deduped.push(point);
+    }
+  }
+  if (deduped.length > 1 && nearlySamePoint(deduped[0], deduped[deduped.length - 1], eps)) {
+    deduped.pop();
+  }
+  return deduped;
+}
+
+function clipPolygonAgainstBisector(polygon, site, other, eps = 1e-7) {
+  if (!polygon.length) return [];
+  const a = other.x - site.x;
+  const b = other.y - site.y;
+  const c = (other.x * other.x + other.y * other.y - site.x * site.x - site.y * site.y) / 2;
+  const inside = point => a * point.x + b * point.y <= c + eps;
+  const intersect = (p1, p2) => {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const denom = a * dx + b * dy;
+    if (Math.abs(denom) < eps) return { x: p2.x, y: p2.y };
+    const t = clamp((c - a * p1.x - b * p1.y) / denom, 0, 1);
+    return { x: p1.x + dx * t, y: p1.y + dy * t };
+  };
+
+  const result = [];
+  for (let i = 0; i < polygon.length; i++) {
+    const current = polygon[i];
+    const next = polygon[(i + 1) % polygon.length];
+    const currentInside = inside(current);
+    const nextInside = inside(next);
+    if (currentInside && nextInside) {
+      result.push(next);
+    } else if (currentInside && !nextInside) {
+      result.push(intersect(current, next));
+    } else if (!currentInside && nextInside) {
+      result.push(intersect(current, next));
+      result.push(next);
+    }
+  }
+
+  return dedupePolygon(result, 1e-4);
+}
+
+function buildClippedVoronoiCells(sites, W, H) {
+  const bounds = [
+    { x: 0, y: 0 },
+    { x: W, y: 0 },
+    { x: W, y: H },
+    { x: 0, y: H },
+  ];
+
+  return sites
+    .map(site => {
+      let polygon = bounds.map(point => ({ ...point }));
+      for (const other of sites) {
+        if (other.id === site.id) continue;
+        polygon = clipPolygonAgainstBisector(polygon, site, other);
+        if (polygon.length < 3) break;
+      }
+
+      polygon = dedupePolygon(polygon, 1e-4);
+      if (polygon.length < 3 || Math.abs(polygonArea(polygon)) < 1e-3) return null;
+
+      return {
+        faceId: `f${site.id}`,
+        site,
+        points: polygon,
+      };
+    })
+    .filter(Boolean);
+}
+
+function boundaryPerimeterT(point, W, H, orientation = "cw", eps = 1e-4) {
+  const x = clamp(point.x, 0, W);
+  const y = clamp(point.y, 0, H);
+  const perimeter = 2 * (W + H);
+  let value;
+
+  if (Math.abs(y) <= eps) value = x;
+  else if (Math.abs(x - W) <= eps) value = W + y;
+  else if (Math.abs(y - H) <= eps) value = W + H + (W - x);
+  else value = 2 * W + H + (H - y);
+
+  return orientation === "cw" ? value : (perimeter - value) % perimeter;
+}
+
+function buildDerivedDCEL(activeSites, W, H) {
+  if (!activeSites.length) {
+    return {
+      vertexCount: 0,
+      halfEdgeCount: 0,
+      faceCount: 0,
+      vertices: [],
+      faces: [],
+      halfEdges: [],
+    };
+  }
+
+  const cells = buildClippedVoronoiCells(activeSites, W, H);
+  const vertices = [];
+  const vertexByKey = new Map();
+  const faces = [];
+  const halfEdges = [];
+  const faceById = new Map();
+
+  const getVertexId = point => {
+    const key = `${roundCoord(point.x, 4)},${roundCoord(point.y, 4)}`;
+    const existing = vertexByKey.get(key);
+    if (existing != null) return existing;
+    const id = vertices.length;
+    vertices.push({
+      id,
+      x: roundCoord(point.x),
+      y: roundCoord(point.y),
+      incidentEdge: null,
+    });
+    vertexByKey.set(key, id);
+    return id;
+  };
+
+  for (const cell of cells) {
+    const face = {
+      id: cell.faceId,
+      label: `Face s${cell.site.id}`,
+      siteId: cell.site.id,
+      siteX: roundCoord(cell.site.x),
+      siteY: roundCoord(cell.site.y),
+      outerComponent: null,
+      innerComponents: [],
+      isOuter: false,
+      polygon: cell.points.map(point => ({
+        x: roundCoord(point.x),
+        y: roundCoord(point.y),
+      })),
+    };
+    faces.push(face);
+    faceById.set(face.id, face);
+
+    const vertexIds = cell.points.map(getVertexId);
+    const edgeIds = [];
+    for (let i = 0; i < vertexIds.length; i++) {
+      const origin = vertexIds[i];
+      const destination = vertexIds[(i + 1) % vertexIds.length];
+      const start = cell.points[i];
+      const end = cell.points[(i + 1) % cell.points.length];
+      const id = halfEdges.length;
+      halfEdges.push({
+        id,
+        label: `e${id}`,
+        origin,
+        destination,
+        twin: null,
+        incidentFace: face.id,
+        next: null,
+        prev: null,
+        leftSiteId: cell.site.id,
+        rightSiteId: null,
+        x1: roundCoord(start.x),
+        y1: roundCoord(start.y),
+        x2: roundCoord(end.x),
+        y2: roundCoord(end.y),
+        isOuterBoundaryTwin: false,
+      });
+      if (vertices[origin].incidentEdge == null) vertices[origin].incidentEdge = id;
+      edgeIds.push(id);
+    }
+
+    for (let i = 0; i < edgeIds.length; i++) {
+      const current = edgeIds[i];
+      halfEdges[current].next = edgeIds[(i + 1) % edgeIds.length];
+      halfEdges[current].prev = edgeIds[(i - 1 + edgeIds.length) % edgeIds.length];
+    }
+    face.outerComponent = edgeIds[0] ?? null;
+  }
+
+  const directedEdgeMap = new Map();
+  for (const edge of halfEdges) {
+    const key = `${edge.origin}:${edge.destination}`;
+    const reverseKey = `${edge.destination}:${edge.origin}`;
+    const reverse = directedEdgeMap.get(reverseKey);
+    if (reverse?.length) {
+      const twinId = reverse.pop();
+      edge.twin = twinId;
+      halfEdges[twinId].twin = edge.id;
+      edge.rightSiteId = faceById.get(halfEdges[twinId].incidentFace)?.siteId ?? null;
+      halfEdges[twinId].rightSiteId = faceById.get(edge.incidentFace)?.siteId ?? null;
+      if (!reverse.length) directedEdgeMap.delete(reverseKey);
+      continue;
+    }
+    const bucket = directedEdgeMap.get(key);
+    if (bucket) bucket.push(edge.id);
+    else directedEdgeMap.set(key, [edge.id]);
+  }
+
+  const outerFace = {
+    id: "f_out",
+    label: "Outer Face",
+    siteId: null,
+    siteX: null,
+    siteY: null,
+    outerComponent: null,
+    innerComponents: [],
+    isOuter: true,
+    polygon: null,
+  };
+  const outerEdgeIds = [];
+
+  for (const edge of halfEdges.slice()) {
+    if (edge.twin != null) continue;
+    const id = halfEdges.length;
+    const twin = {
+      id,
+      label: `e${id}`,
+      origin: edge.destination,
+      destination: edge.origin,
+      twin: edge.id,
+      incidentFace: outerFace.id,
+      next: null,
+      prev: null,
+      leftSiteId: null,
+      rightSiteId: faceById.get(edge.incidentFace)?.siteId ?? null,
+      x1: edge.x2,
+      y1: edge.y2,
+      x2: edge.x1,
+      y2: edge.y1,
+      isOuterBoundaryTwin: true,
+    };
+    halfEdges.push(twin);
+    edge.twin = id;
+    if (vertices[twin.origin].incidentEdge == null) vertices[twin.origin].incidentEdge = id;
+    outerEdgeIds.push(id);
+  }
+
+  if (outerEdgeIds.length) {
+    const perimeter = 2 * (W + H);
+    const scoreOrientation = orientation => outerEdgeIds.reduce((score, edgeId) => {
+      const edge = halfEdges[edgeId];
+      const origin = vertices[edge.origin];
+      const destination = vertices[edge.destination];
+      const delta = (boundaryPerimeterT(destination, W, H, orientation) - boundaryPerimeterT(origin, W, H, orientation) + perimeter) % perimeter;
+      return score + (delta <= perimeter / 2 ? 1 : -1);
+    }, 0);
+    const orientation = scoreOrientation("cw") >= scoreOrientation("ccw") ? "cw" : "ccw";
+    outerEdgeIds.sort((a, b) => {
+      const edgeA = halfEdges[a];
+      const edgeB = halfEdges[b];
+      return boundaryPerimeterT(vertices[edgeA.origin], W, H, orientation) - boundaryPerimeterT(vertices[edgeB.origin], W, H, orientation);
+    });
+    for (let i = 0; i < outerEdgeIds.length; i++) {
+      const current = outerEdgeIds[i];
+      halfEdges[current].next = outerEdgeIds[(i + 1) % outerEdgeIds.length];
+      halfEdges[current].prev = outerEdgeIds[(i - 1 + outerEdgeIds.length) % outerEdgeIds.length];
+    }
+    outerFace.innerComponents = [outerEdgeIds[0]];
+  }
+
+  faces.push(outerFace);
+
+  return {
+    vertexCount: vertices.length,
+    halfEdgeCount: halfEdges.length,
+    faceCount: faces.length,
+    vertices,
+    faces,
+    halfEdges,
+  };
+}
+
 const SITE=0, CIRCLE=1;
+
+function makeEventDebugId(evt) {
+  return evt.type === SITE
+    ? `site-${evt.site.id}-${Math.round(evt.x * 10)}`
+    : `circle-${Math.round(evt.x * 10)}-${Math.round(evt.center.x * 10)}-${Math.round(evt.center.y * 10)}-${Math.round(evt.radius * 10)}`;
+}
 
 class FortuneAlgo {
   constructor(sites, W, H) {
@@ -143,6 +450,7 @@ class FortuneAlgo {
     this.activeCircles = [];
     this.nextArcDebugId = 0;
     this.nextEdgeDebugId = 0;
+    this.eventHistory = [];
   }
 
   makeArc(site, extra = {}) {
@@ -284,6 +592,12 @@ class FortuneAlgo {
       this.sweepX = evt.x; this.lastEvent = evt; this.stepCount++;
       if (evt.type === SITE) this.handleSite(evt);
       else if (!this.handleCircle(evt)) continue;
+      this.eventHistory.push({
+        id: makeEventDebugId(evt),
+        type: evt.type === SITE ? "site" : "circle",
+        x: Math.round(evt.x * 10) / 10,
+        rawX: evt.x,
+      });
       processed++;
     }
     this.sweepX = x;
@@ -439,37 +753,16 @@ class FortuneAlgo {
   }
 
   getDCEL() {
-    const verts = this.vertices.map((v,i) => ({ id:i, x:Math.round(v.x*10)/10, y:Math.round(v.y*10)/10 }));
-    const rawEdges = this.edges
-      .filter(e => e.end && e.left?.id != null && e.right?.id != null)
-      .map(e => {
-        const siteAId = Math.min(e.left.id, e.right.id);
-        const siteBId = Math.max(e.left.id, e.right.id);
-        return {
-          id: `edge-${e.debugId}`,
-          sourceIds: [e.debugId],
-          siteAId,
-          siteBId,
-          leftId: siteAId,
-          rightId: siteBId,
-          x1: Math.round(e.start.x * 10) / 10,
-          y1: Math.round(e.start.y * 10) / 10,
-          x2: Math.round(e.end.x * 10) / 10,
-          y2: Math.round(e.end.y * 10) / 10,
-        };
-      });
-    const eds = mergeDebugEdges(rawEdges);
-    const faceIds = new Set(); this.sites.forEach(s=>faceIds.add(s.id));
-    return { vertexCount:verts.length, edgeCount:eds.length, faceCount:faceIds.size, vertices:verts, edges:eds };
+    const activeSites = this.sites.filter(site => site.x <= this.sweepX + 0.01);
+    return buildDerivedDCEL(activeSites, this.W, this.H);
   }
 
   getQueueContents() {
     return this.queue.filter(e=>e.type===SITE||!e.invalid).map(e=>({
-      id: e.type === SITE
-        ? `site-${e.site.id}-${Math.round(e.x * 10)}`
-        : `circle-${Math.round(e.x * 10)}-${Math.round(e.center.x * 10)}-${Math.round(e.center.y * 10)}-${Math.round(e.radius * 10)}`,
+      id: makeEventDebugId(e),
       type:e.type===SITE?"site":"circle",
       x:Math.round(e.x*10)/10,
+      rawX:e.x,
       siteId:e.type===SITE?e.site.id:null,
       siteX:e.type===SITE?Math.round(e.site.x*10)/10:null,
       siteY:e.type===SITE?Math.round(e.site.y*10)/10:null,
@@ -481,6 +774,10 @@ class FortuneAlgo {
         ? [e.arc?.prev?.site?.id ?? null, e.arc?.site?.id ?? null, e.arc?.next?.site?.id ?? null]
         : null,
     }));
+  }
+
+  getEventHistory() {
+    return this.eventHistory.slice();
   }
 
   // Get edges that are growing (unfinished) with their current breakpoint position
@@ -661,25 +958,21 @@ function buildAllSidebarFocuses(panelData) {
     }
   }
 
-  if (panelData.queue?.length) {
-    for (const event of panelData.queue) {
-      focuses.push(makeSidebarFocus(
-        event.type === "site" ? "queue-site" : "queue-circle",
-        event.id,
-        event
-      ));
-    }
-  }
-
   if (panelData.dcel?.vertices?.length) {
     for (const vertex of panelData.dcel.vertices) {
       focuses.push(makeSidebarFocus("dcel-vertex", `vertex-${vertex.id}`, { ...vertex, vertexId: vertex.id }));
     }
   }
 
-  if (panelData.dcel?.edges?.length) {
-    for (const edge of panelData.dcel.edges) {
-      focuses.push(makeSidebarFocus("dcel-edge", `edge-${edge.id}`, { ...edge, edgeId: edge.id }));
+  if (panelData.dcel?.faces?.length) {
+    for (const face of panelData.dcel.faces) {
+      focuses.push(makeSidebarFocus("dcel-face", `face-${face.id}`, { ...face, faceId: face.id }));
+    }
+  }
+
+  if (panelData.dcel?.halfEdges?.length) {
+    for (const edge of panelData.dcel.halfEdges) {
+      focuses.push(makeSidebarFocus("dcel-half-edge", `half-edge-${edge.id}`, { ...edge, halfEdgeId: edge.id }));
     }
   }
 
@@ -1035,6 +1328,30 @@ function drawEdgeHighlight(ctx, focus, theme) {
   ctx.restore();
 }
 
+function drawFaceHighlight(ctx, focus, theme) {
+  if (!focus.polygon?.length) return;
+  ctx.save();
+  const fillColor = focus.siteId != null ? col(focus.siteId) : theme.accent;
+  ctx.fillStyle = `${fillColor}22`;
+  ctx.strokeStyle = fillColor;
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.moveTo(focus.polygon[0].x, focus.polygon[0].y);
+  for (let i = 1; i < focus.polygon.length; i++) {
+    ctx.lineTo(focus.polygon[i].x, focus.polygon[i].y);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  if (focus.siteX != null && focus.siteY != null) {
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.arc(focus.siteX, focus.siteY, 14, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawSidebarFocus(ctx, focus, beachlineDebug, sweepX, theme, W, H) {
   if (!focus) return;
 
@@ -1054,7 +1371,11 @@ function drawSidebarFocus(ctx, focus, beachlineDebug, sweepX, theme, W, H) {
     drawVertexHighlight(ctx, focus, theme);
     return;
   }
-  if (focus.kind === "dcel-edge") {
+  if (focus.kind === "dcel-face") {
+    drawFaceHighlight(ctx, focus, theme);
+    return;
+  }
+  if (focus.kind === "dcel-half-edge") {
     drawEdgeHighlight(ctx, focus, theme);
   }
 }
@@ -1176,15 +1497,6 @@ function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme,
       ctx.fillStyle = theme.sweepText;
       ctx.font = "11px 'JetBrains Mono',monospace"; ctx.textAlign = "right";
       ctx.fillText(`x = ${sx.toFixed(0)}`, sx-8, 16);
-
-      // Drag handle — small diamond at midpoint of sweep line
-      const mid = H/2;
-      ctx.fillStyle = theme.sweepLine;
-      ctx.globalAlpha = 0.5;
-      ctx.beginPath();
-      ctx.moveTo(sx, mid-8); ctx.lineTo(sx+5, mid); ctx.lineTo(sx, mid+8); ctx.lineTo(sx-5, mid);
-      ctx.closePath(); ctx.fill();
-      ctx.globalAlpha = 1;
     }
 
     // ── Vertices (only inside bounds) ──
@@ -1247,6 +1559,7 @@ function BeachlineTreeView({
   const layout = useMemo(() => layoutBeachlineTree(debug.tree), [debug.tree]);
   const viewportRef = useRef(null);
   const panStateRef = useRef(null);
+  const wheelMomentumRef = useRef({ dx: 0, dy: 0, raf: 0 });
   const [isPanning, setIsPanning] = useState(false);
   if (!layout) return null;
 
@@ -1262,6 +1575,38 @@ function BeachlineTreeView({
   const lastPinnedNodeId = pinnedNodeIds?.length ? pinnedNodeIds[pinnedNodeIds.length - 1] : null;
   const focusTargetId = activeNodeId || lastPinnedNodeId || debug.tree.rootId;
 
+  const flushWheelMomentum = useCallback(() => {
+    const viewport = viewportRef.current;
+    const wheel = wheelMomentumRef.current;
+    if (!viewport) {
+      wheel.raf = 0;
+      return;
+    }
+
+    const stepX = Math.abs(wheel.dx) < 0.35 ? wheel.dx : wheel.dx * 0.34;
+    const stepY = Math.abs(wheel.dy) < 0.35 ? wheel.dy : wheel.dy * 0.34;
+    viewport.scrollLeft += stepX;
+    viewport.scrollTop += stepY;
+    wheel.dx -= stepX;
+    wheel.dy -= stepY;
+
+    if (Math.abs(wheel.dx) < 0.2 && Math.abs(wheel.dy) < 0.2) {
+      wheel.dx = 0;
+      wheel.dy = 0;
+      wheel.raf = 0;
+      return;
+    }
+
+    wheel.raf = requestAnimationFrame(flushWheelMomentum);
+  }, []);
+
+  const queueWheelPan = useCallback((deltaX, deltaY) => {
+    const wheel = wheelMomentumRef.current;
+    wheel.dx += deltaX;
+    wheel.dy += deltaY;
+    if (!wheel.raf) wheel.raf = requestAnimationFrame(flushWheelMomentum);
+  }, [flushWheelMomentum]);
+
   useEffect(() => {
     if (lastPinnedNodeId) centerNode(lastPinnedNodeId, "smooth");
   }, [lastPinnedNodeId, centerNode]);
@@ -1269,9 +1614,15 @@ function BeachlineTreeView({
   useEffect(() => {
     setIsPanning(false);
     panStateRef.current = null;
+    if (wheelMomentumRef.current.raf) cancelAnimationFrame(wheelMomentumRef.current.raf);
+    wheelMomentumRef.current = { dx: 0, dy: 0, raf: 0 };
     const viewport = viewportRef.current;
     if (viewport) viewport.scrollTo({ left: 0, top: 0, behavior: "auto" });
   }, [debug.tree.rootId]);
+
+  useEffect(() => () => {
+    if (wheelMomentumRef.current.raf) cancelAnimationFrame(wheelMomentumRef.current.raf);
+  }, []);
 
   useEffect(() => {
     if (!isPanning) return;
@@ -1296,7 +1647,9 @@ function BeachlineTreeView({
 
   const beginPan = useCallback(event => {
     if (event.button !== 0) return;
-    if (!(event.target instanceof SVGSVGElement)) return;
+    const target = event.target;
+    const isSvgSurface = target instanceof SVGSVGElement || target instanceof SVGRectElement;
+    if (!isSvgSurface) return;
     const viewport = viewportRef.current;
     if (!viewport) return;
     panStateRef.current = {
@@ -1311,20 +1664,44 @@ function BeachlineTreeView({
   const handleWheel = useCallback(event => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    if (event.shiftKey) {
-      event.preventDefault();
-      viewport.scrollLeft += event.deltaY;
-      return;
+    const canPanX = viewport.scrollWidth > viewport.clientWidth + 1;
+    const canPanY = viewport.scrollHeight > viewport.clientHeight + 1;
+    if (!canPanX && !canPanY) return;
+
+    let deltaX = normalizeWheelDelta(event.deltaX, event.deltaMode);
+    let deltaY = normalizeWheelDelta(event.deltaY, event.deltaMode);
+
+    if (event.shiftKey && Math.abs(deltaX) < Math.abs(deltaY) * 0.75) {
+      deltaX += deltaY;
+      deltaY = 0;
+    } else if (!canPanY && canPanX && Math.abs(deltaY) > Math.abs(deltaX)) {
+      deltaX += deltaY * 0.9;
+      deltaY = 0;
     }
-    if (layout.width > viewport.clientWidth) {
-      viewport.scrollLeft += event.deltaX * 0.9;
-    }
-  }, [layout.width]);
+
+    const wantsX = Math.abs(deltaX) > 0.1;
+    const wantsY = Math.abs(deltaY) > 0.1;
+    const maxScrollLeft = viewport.scrollWidth - viewport.clientWidth - 1;
+    const maxScrollTop = viewport.scrollHeight - viewport.clientHeight - 1;
+    const canConsumeX = wantsX && canPanX && (
+      (deltaX < 0 && viewport.scrollLeft > 0) ||
+      (deltaX > 0 && viewport.scrollLeft < maxScrollLeft)
+    );
+    const canConsumeY = wantsY && canPanY && (
+      (deltaY < 0 && viewport.scrollTop > 0) ||
+      (deltaY > 0 && viewport.scrollTop < maxScrollTop)
+    );
+    const shouldCapture = canConsumeX || canConsumeY || (canPanX && !canPanY && wantsX);
+    if (!shouldCapture) return;
+
+    event.preventDefault();
+    queueWheelPan(deltaX, deltaY);
+  }, [queueWheelPan]);
 
   return (
     <div onMouseLeave={onLeaveTree}>
       <div style={{ color: theme.textDim, lineHeight: 1.5, marginBottom: 10 }}>
-        Hover for a quick preview. Click a node to lock it on, then drag or shift-scroll to pan the tree.
+        Hover for a quick preview. Click a node to lock it on, then use two-finger pan or drag empty space to move around the tree.
       </div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:8}}>
         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
@@ -1341,24 +1718,31 @@ function BeachlineTreeView({
             Center Selection
           </button>
         </div>
-        <div style={{color:theme.textDimmer,fontSize:10}}>Pan: drag empty space</div>
+        <div style={{color:theme.textDimmer,fontSize:10}}>Trackpad: two-finger pan</div>
       </div>
       <div style={{
         position:"relative",
         border:`1px solid ${theme.panelBorder}`,
         borderRadius:14,
-        background:`linear-gradient(180deg, ${theme.btnBg} 0%, ${theme.panelBg} 100%)`,
-        padding:10,
+        background:`radial-gradient(circle at top, ${theme.btnBg} 0%, ${theme.panelBg} 72%)`,
+        padding:12,
+        boxShadow:`inset 0 1px 0 ${theme.panelBorder}55`,
       }}>
         <div
           ref={viewportRef}
           onWheel={handleWheel}
           style={{
             overflow:"auto",
-            maxHeight:320,
-            paddingBottom:4,
-            scrollBehavior:"smooth",
+            height:"min(430px, 54vh)",
+            minHeight:280,
+            padding:"6px 8px 8px 6px",
+            scrollBehavior:"auto",
             overscrollBehavior:"contain",
+            scrollbarWidth:"thin",
+            scrollbarColor:`${theme.btnBorder} transparent`,
+            scrollbarGutter:"stable both-edges",
+            WebkitOverflowScrolling:"touch",
+            touchAction:"none",
             cursor:isPanning ? "grabbing" : (layout.width > 260 || layout.height > 220 ? "grab" : "default"),
           }}
         >
@@ -1369,6 +1753,7 @@ function BeachlineTreeView({
           style={{ display: "block" }}
           onMouseDown={beginPan}
         >
+          <rect x="0" y="0" width={layout.width} height={layout.height} rx="16" fill="transparent" />
           {layout.nodes
             .filter(node => node.kind === "internal")
             .map(node => {
@@ -1430,8 +1815,8 @@ function BeachlineTreeView({
         <div style={{
           pointerEvents:"none",
           position:"absolute",
-          inset:1,
-          borderRadius:13,
+          inset:12,
+          borderRadius:12,
           boxShadow:`inset 0 18px 24px -24px ${theme.pageBg}, inset 0 -18px 24px -24px ${theme.pageBg}`,
         }}/>
       </div>
@@ -1477,8 +1862,11 @@ function sidebarFocusStillExists(focus, panelData) {
   if (focus.kind === "dcel-vertex") {
     return panelData.dcel?.vertices.some(vertex => vertex.id === focus.vertexId) ?? false;
   }
-  if (focus.kind === "dcel-edge") {
-    return panelData.dcel?.edges.some(edge => edge.id === focus.edgeId) ?? false;
+  if (focus.kind === "dcel-face") {
+    return panelData.dcel?.faces.some(face => face.id === focus.faceId) ?? false;
+  }
+  if (focus.kind === "dcel-half-edge") {
+    return panelData.dcel?.halfEdges.some(edge => edge.id === focus.halfEdgeId) ?? false;
   }
   return false;
 }
@@ -1516,12 +1904,16 @@ function SidebarCard({
 
 function StructuresSidebar({
   docked,
+  sidebarWidth,
   theme,
   panelData,
   panelExpanded,
   setPanelExpanded,
+  canStepToPreviousEvent,
+  onStepToPreviousEvent,
   canStepToNextEvent,
   onStepToNextEvent,
+  onJumpToQueueEvent,
   hoveredSidebarFocus,
   pinnedSidebarFocuses,
   onPinAllFocuses,
@@ -1534,20 +1926,20 @@ function StructuresSidebar({
 }) {
   return (
     <aside style={{
-      width: docked ? 380 : "min(400px, calc(100vw - 24px))",
-      maxHeight: docked ? "calc(100vh - 40px)" : "calc(100vh - 24px)",
+      width: sidebarWidth,
+      maxHeight: docked ? "calc(100vh - 32px)" : "calc(100vh - 20px)",
       background: theme.panelBg,
       border: `1px solid ${theme.panelBorder}`,
-      borderRadius: 20,
+      borderRadius: 22,
       boxShadow: theme.shadow,
       overflow: "hidden",
       display: "flex",
       flexDirection: "column",
       position: docked ? "sticky" : "relative",
-      top: docked ? 20 : undefined,
+      top: docked ? 16 : undefined,
     }}>
       <div style={{
-        padding:"16px 16px 14px",
+        padding:"18px 18px 16px",
         borderBottom:`1px solid ${theme.panelBorder}`,
         background:`linear-gradient(180deg, ${theme.btnBg} 0%, ${theme.panelBg} 100%)`,
       }}>
@@ -1570,13 +1962,16 @@ function StructuresSidebar({
       </div>
 
       <div style={{
-        padding:"12px 14px 14px",
+        padding:"14px 16px 18px",
         overflowY:"auto",
         display:"flex",
         flexDirection:"column",
-        gap:10,
+        gap:12,
         scrollBehavior:"smooth",
         overscrollBehavior:"contain",
+        scrollbarWidth:"thin",
+        scrollbarColor:`${theme.btnBorder} transparent`,
+        scrollPaddingTop:12,
       }}>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <div style={{
@@ -1629,90 +2024,108 @@ function StructuresSidebar({
         <PanelSection title="Priority Queue" theme={theme}
           summary={panelData.queue?`${panelData.queue.length} events`:"—"}
           expanded={panelExpanded.queue} onToggle={()=>setPanelExpanded(p=>({...p,queue:!p.queue}))}>
-          {panelData.queue?.length ? (
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              <div style={{display:"flex",justifyContent:"flex-start"}}>
-                <button
-                  onClick={onStepToNextEvent}
-                  disabled={!canStepToNextEvent}
-                  style={{
-                    background: theme.btnBg,
-                    border: `1px solid ${theme.btnBorder}`,
-                    borderRadius: 999,
-                    padding: "6px 10px",
-                    cursor: canStepToNextEvent ? "pointer" : "default",
-                    color: canStepToNextEvent ? theme.textMuted : theme.textDimmer,
-                    opacity: canStepToNextEvent ? 1 : 0.45,
-                    fontSize: 10,
-                    fontFamily: "'JetBrains Mono',monospace",
-                  }}
-                >
-                  Next Event →
-                </button>
-              </div>
-              <div style={{color:theme.textDim,lineHeight:1.5}}>
-                Hover an event to preview where it lands on the canvas. Click to keep that event in focus while you step the sweep.
-              </div>
-              {panelData.queue.slice(0, 16).map(ev => {
-                const focus = ev.type === "site"
-                  ? makeSidebarFocus("queue-site", ev.id, ev)
-                  : makeSidebarFocus("queue-circle", ev.id, ev);
-                const active = sameSidebarFocus(hoveredSidebarFocus, focus);
-                const pinned = hasSidebarFocus(pinnedSidebarFocuses, focus);
-                const accent = ev.type === "site" ? col(ev.siteId) : theme.accent;
-                return (
-                  <SidebarCard
-                    key={ev.id}
-                    active={active}
-                    pinned={pinned}
-                    accent={accent}
-                    theme={theme}
-                    onMouseEnter={() => onHoverFocus(focus)}
-                    onMouseLeave={() => onHoverFocus(null)}
-                    onClick={() => onTogglePinnedFocus(focus)}
-                  >
-                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8,fontFamily:"'JetBrains Mono',monospace",fontSize:11}}>
-                        <span style={{
-                          color: ev.type === "site" ? col(ev.siteId) : theme.accent,
-                          fontWeight: 600,
-                        }}>
-                          {ev.type === "site" ? `● s${ev.siteId}` : "○ circle"}
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{color:theme.textDim,lineHeight:1.5}}>
+              Hover an event to preview where it lands on the canvas. Click an event to jump the sweep directly to it.
+            </div>
+            <div style={{display:"flex",justifyContent:"flex-start",gap:8,flexWrap:"wrap"}}>
+              <button
+                onClick={onStepToPreviousEvent}
+                disabled={!canStepToPreviousEvent}
+                style={{
+                  background: theme.btnBg,
+                  border: `1px solid ${theme.btnBorder}`,
+                  borderRadius: 999,
+                  padding: "6px 10px",
+                  cursor: canStepToPreviousEvent ? "pointer" : "default",
+                  color: canStepToPreviousEvent ? theme.textMuted : theme.textDimmer,
+                  opacity: canStepToPreviousEvent ? 1 : 0.45,
+                  fontSize: 10,
+                  fontFamily: "'JetBrains Mono',monospace",
+                }}
+              >
+                ← Previous Event
+              </button>
+              <button
+                onClick={onStepToNextEvent}
+                disabled={!canStepToNextEvent}
+                style={{
+                  background: theme.btnBg,
+                  border: `1px solid ${theme.btnBorder}`,
+                  borderRadius: 999,
+                  padding: "6px 10px",
+                  cursor: canStepToNextEvent ? "pointer" : "default",
+                  color: canStepToNextEvent ? theme.textMuted : theme.textDimmer,
+                  opacity: canStepToNextEvent ? 1 : 0.45,
+                  fontSize: 10,
+                  fontFamily: "'JetBrains Mono',monospace",
+                }}
+              >
+                Next Event →
+              </button>
+            </div>
+            {panelData.queue?.length ? (
+              <>
+                {panelData.queue.slice(0, 16).map(ev => {
+                  const focus = ev.type === "site"
+                    ? makeSidebarFocus("queue-site", ev.id, ev)
+                    : makeSidebarFocus("queue-circle", ev.id, ev);
+                  const active = sameSidebarFocus(hoveredSidebarFocus, focus);
+                  const accent = ev.type === "site" ? col(ev.siteId) : theme.accent;
+                  return (
+                    <SidebarCard
+                      key={ev.id}
+                      active={active}
+                      pinned={false}
+                      accent={accent}
+                      theme={theme}
+                      onMouseEnter={() => onHoverFocus(focus)}
+                      onMouseLeave={() => onHoverFocus(null)}
+                      onClick={() => onJumpToQueueEvent(ev)}
+                    >
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,fontFamily:"'JetBrains Mono',monospace",fontSize:11}}>
+                          <span style={{
+                            color: ev.type === "site" ? col(ev.siteId) : theme.accent,
+                            fontWeight: 600,
+                          }}>
+                            {ev.type === "site" ? `● s${ev.siteId}` : "○ circle"}
+                          </span>
+                          <span style={{color:theme.textDim}}>x={ev.x}</span>
+                        </div>
+                        <span style={{color:active ? accent : theme.textDimmer,fontSize:10,fontFamily:"'JetBrains Mono',monospace"}}>
+                          {active ? "preview" : "jump"}
                         </span>
-                        <span style={{color:theme.textDim}}>x={ev.x}</span>
                       </div>
-                      <span style={{color:pinned?accent:theme.textDimmer,fontSize:10,fontFamily:"'JetBrains Mono',monospace"}}>
-                        {pinned ? "locked" : active ? "preview" : "peek"}
-                      </span>
-                    </div>
-                    <div style={{color:theme.textMuted,fontSize:11,lineHeight:1.55,marginTop:6}}>
-                      {ev.type === "site"
-                        ? `Site at (${ev.siteX}, ${ev.siteY})`
-                        : `Center (${ev.centerX}, ${ev.centerY}) · r=${ev.radius}${ev.tripleSiteIds?.filter(id => id != null).length ? ` · sites ${ev.tripleSiteIds.filter(id => id != null).map(id => `s${id}`).join(" / ")}` : ""}`}
-                    </div>
-                  </SidebarCard>
-                );
-              })}
-              {panelData.queue.length > 16 && (
-                <div style={{color:theme.textDimmer,fontSize:11}}>
-                  ...+{panelData.queue.length - 16} more events queued
-                </div>
-              )}
-            </div>
-          ) : (
-            <div style={{color:theme.textDim,lineHeight:1.6}}>
-              No pending events right now.
-            </div>
-          )}
+                      <div style={{color:theme.textMuted,fontSize:11,lineHeight:1.55,marginTop:6}}>
+                        {ev.type === "site"
+                          ? `Site at (${ev.siteX}, ${ev.siteY})`
+                          : `Center (${ev.centerX}, ${ev.centerY}) · r=${ev.radius}${ev.tripleSiteIds?.filter(id => id != null).length ? ` · sites ${ev.tripleSiteIds.filter(id => id != null).map(id => `s${id}`).join(" / ")}` : ""}`}
+                      </div>
+                    </SidebarCard>
+                  );
+                })}
+                {panelData.queue.length > 16 && (
+                  <div style={{color:theme.textDimmer,fontSize:11}}>
+                    ...+{panelData.queue.length - 16} more events queued
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{color:theme.textDim,lineHeight:1.6}}>
+                No pending events right now.
+              </div>
+            )}
+          </div>
         </PanelSection>
 
         <PanelSection title="DCEL" theme={theme}
-          summary={panelData.dcel?`${panelData.dcel.vertexCount}V · ${panelData.dcel.edgeCount}E · ${panelData.dcel.faceCount}F`:"—"}
+          summary={panelData.dcel?`${panelData.dcel.vertexCount}V · ${panelData.dcel.halfEdgeCount}HE · ${panelData.dcel.faceCount}F`:"—"}
           expanded={panelExpanded.dcel} onToggle={()=>setPanelExpanded(p=>({...p,dcel:!p.dcel}))}>
           {panelData.dcel ? (
             <div style={{display:"grid",gap:10}}>
               <div style={{color:theme.textDim,lineHeight:1.5}}>
-                Inspect the geometry that has already solidified. Vertices ring their Voronoi corner; edges brighten on the canvas.
+                Inspect the clipped DCEL for the processed cells. Vertices expose one incident half-edge, faces expose outer and inner boundary handles, and half-edges expose their local topology.
               </div>
 
               <div>
@@ -1741,6 +2154,9 @@ function StructuresSidebar({
                             ({vertex.x}, {vertex.y})
                           </span>
                         </div>
+                        <div style={{color:theme.textMuted,fontSize:11,lineHeight:1.55,marginTop:6}}>
+                          origin edge: {vertex.incidentEdge != null ? `e${vertex.incidentEdge}` : "—"}
+                        </div>
                       </SidebarCard>
                     );
                   }) : (
@@ -1756,19 +2172,67 @@ function StructuresSidebar({
 
               <div>
                 <div style={{color:theme.textMuted,marginBottom:6,fontSize:11,textTransform:"uppercase",letterSpacing:"0.04em"}}>
-                  Edges
+                  Faces
                 </div>
                 <div style={{display:"grid",gap:7}}>
-                  {panelData.dcel.edges.length ? panelData.dcel.edges.slice(0, 12).map(edge => {
-                    const focus = makeSidebarFocus("dcel-edge", `edge-${edge.id}`, { ...edge, edgeId: edge.id });
+                  {panelData.dcel.faces.length ? panelData.dcel.faces.slice(0, 12).map(face => {
+                    const focus = makeSidebarFocus("dcel-face", `face-${face.id}`, { ...face, faceId: face.id });
                     const active = sameSidebarFocus(hoveredSidebarFocus, focus);
                     const pinned = hasSidebarFocus(pinnedSidebarFocuses, focus);
+                    const accent = face.siteId != null ? col(face.siteId) : theme.accent;
+                    return (
+                      <SidebarCard
+                        key={face.id}
+                        active={active}
+                        pinned={pinned}
+                        accent={accent}
+                        theme={theme}
+                        onMouseEnter={() => onHoverFocus(focus)}
+                        onMouseLeave={() => onHoverFocus(null)}
+                        onClick={() => onTogglePinnedFocus(focus)}
+                      >
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                          <span style={{color:theme.text,fontFamily:"'JetBrains Mono',monospace",fontSize:11}}>
+                            {face.isOuter ? "f_out" : `f${face.siteId}`}
+                          </span>
+                          <span style={{color:theme.textDim,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>
+                            {face.isOuter ? "outside" : `site s${face.siteId}`}
+                          </span>
+                        </div>
+                        <div style={{color:theme.textMuted,fontSize:11,lineHeight:1.55,marginTop:6}}>
+                          outer: {face.outerComponent != null ? `e${face.outerComponent}` : "—"}
+                          {" · "}
+                          inner: {face.innerComponents.length ? face.innerComponents.map(id => `e${id}`).join(", ") : "none"}
+                        </div>
+                      </SidebarCard>
+                    );
+                  }) : (
+                    <div style={{color:theme.textDim,lineHeight:1.6}}>No faces available yet.</div>
+                  )}
+                  {panelData.dcel.faces.length > 12 && (
+                    <div style={{color:theme.textDimmer,fontSize:11}}>
+                      ...+{panelData.dcel.faces.length - 12} more faces
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <div style={{color:theme.textMuted,marginBottom:6,fontSize:11,textTransform:"uppercase",letterSpacing:"0.04em"}}>
+                  Half-Edges
+                </div>
+                <div style={{display:"grid",gap:7}}>
+                  {panelData.dcel.halfEdges.length ? panelData.dcel.halfEdges.slice(0, 14).map(edge => {
+                    const focus = makeSidebarFocus("dcel-half-edge", `half-edge-${edge.id}`, { ...edge, halfEdgeId: edge.id });
+                    const active = sameSidebarFocus(hoveredSidebarFocus, focus);
+                    const pinned = hasSidebarFocus(pinnedSidebarFocuses, focus);
+                    const accent = edge.leftSiteId != null ? col(edge.leftSiteId) : theme.accent;
                     return (
                       <SidebarCard
                         key={edge.id}
                         active={active}
                         pinned={pinned}
-                        accent={theme.accent}
+                        accent={accent}
                         theme={theme}
                         onMouseEnter={() => onHoverFocus(focus)}
                         onMouseLeave={() => onHoverFocus(null)}
@@ -1777,24 +2241,27 @@ function StructuresSidebar({
                         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
                           <span style={{color:theme.text,fontFamily:"'JetBrains Mono',monospace",fontSize:11}}>e{edge.id}</span>
                           <span style={{color:theme.textDim,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>
-                            {Math.hypot(edge.x2 - edge.x1, edge.y2 - edge.y1).toFixed(1)}px
+                            v{edge.origin} → v{edge.destination}
                           </span>
                         </div>
                         <div style={{color:theme.textMuted,fontSize:11,lineHeight:1.55,marginTop:6}}>
-                          <span style={{color:col(edge.leftId ?? 0)}}>s{edge.leftId ?? "?"}</span>
-                          {" | "}
-                          <span style={{color:col(edge.rightId ?? 0)}}>s{edge.rightId ?? "?"}</span>
+                          twin: {edge.twin != null ? `e${edge.twin}` : "—"}
                           {" · "}
-                          ({edge.x1}, {edge.y1}) → ({edge.x2}, {edge.y2})
+                          face: {edge.incidentFace === "f_out" ? "f_out" : edge.incidentFace}
+                        </div>
+                        <div style={{color:theme.textMuted,fontSize:11,lineHeight:1.55}}>
+                          next: {edge.next != null ? `e${edge.next}` : "—"}
+                          {" · "}
+                          prev: {edge.prev != null ? `e${edge.prev}` : "—"}
                         </div>
                       </SidebarCard>
                     );
                   }) : (
-                    <div style={{color:theme.textDim,lineHeight:1.6}}>No completed edges yet.</div>
+                    <div style={{color:theme.textDim,lineHeight:1.6}}>No half-edges available yet.</div>
                   )}
-                  {panelData.dcel.edges.length > 12 && (
+                  {panelData.dcel.halfEdges.length > 14 && (
                     <div style={{color:theme.textDimmer,fontSize:11}}>
-                      ...+{panelData.dcel.edges.length - 12} more edges
+                      ...+{panelData.dcel.halfEdges.length - 14} more half-edges
                     </div>
                   )}
                 </div>
@@ -1840,8 +2307,10 @@ export default function VoronoiVisualizer() {
   const pinnedBeachNodeIds = pinnedSidebarFocuses
     .filter(focus => focus.kind === "beach-node")
     .map(focus => focus.id);
-  const isDockedSidebar = showPanel && viewportWidth >= 1220;
+  const isDockedSidebar = showPanel && viewportWidth >= 1320;
   const isDrawerSidebar = showPanel && !isDockedSidebar;
+  const dockedSidebarWidth = clamp(Math.round(viewportWidth * 0.3), 430, 500);
+  const drawerSidebarWidth = Math.min(480, Math.max(340, viewportWidth - 20));
 
   const W=860, H=520;
 
@@ -1903,7 +2372,11 @@ export default function VoronoiVisualizer() {
       setHoveredSidebarFocus(null);
     }
     setPinnedSidebarFocuses(current => {
-      const filtered = current.filter(focus => sidebarFocusStillExists(focus, panelData));
+      const filtered = current.filter(focus =>
+        focus.kind !== "queue-site" &&
+        focus.kind !== "queue-circle" &&
+        sidebarFocusStillExists(focus, panelData)
+      );
       return filtered.length === current.length ? current : filtered;
     });
   }, [panelData, hoveredSidebarFocus]);
@@ -1933,6 +2406,14 @@ export default function VoronoiVisualizer() {
   const handlePinAllSidebarFocuses = useCallback(() => {
     setPinnedSidebarFocuses(buildAllSidebarFocuses(panelData));
   }, []);
+
+  const handleJumpToQueueEvent = useCallback(event => {
+    if (mode !== "animate") return;
+    const algo = alg.current;
+    if (!algo || algo.done) return;
+    setPlaying(false);
+    scrubTo(event.rawX + 0.1);
+  }, [mode, scrubTo]);
 
   function pxPerSec(s) {
     if (s <= 50) return 10 + (s/50)*140;
@@ -2115,6 +2596,26 @@ export default function VoronoiVisualizer() {
     if(algo.done){setMode("done");setPlaying(false);}
   },[sites,showSweep,showBeach,showCircles,showEdges,syncHud,theme,pinnedSidebarFocuses,hoveredSidebarFocus]);
 
+  const stepToPrevious = useCallback(() => {
+    const algo = alg.current;
+    if (!algo) return;
+    const history = algo.getEventHistory();
+    let target = null;
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].rawX <= sweepXRef.current - 0.11) {
+        target = history[i].rawX + 0.1;
+        break;
+      }
+    }
+    setPlaying(false);
+    if (mode === "done") setMode("animate");
+    if (target == null) {
+      rebuildTo(-10);
+      return;
+    }
+    rebuildTo(target);
+  }, [mode, rebuildTo]);
+
   const stepPx=useCallback((delta)=>{
     if(!alg.current)return;
     if(mode==="done"&&delta<0)setMode("animate");
@@ -2156,7 +2657,11 @@ export default function VoronoiVisualizer() {
   },[]);
 
   const dpr=typeof window!=="undefined"?(window.devicePixelRatio||1):1;
-  const speedLabel=speed<=15?"Slow":speed<=40?"Moderate":speed<=70?"Fast":"Very Fast";
+  const eventHistory = alg.current ? alg.current.getEventHistory() : [];
+  const canStepToPreviousEvent = (mode === "animate" || mode === "done") &&
+    !playing &&
+    eventHistory.some(event => event.rawX <= sweepXRef.current - 0.11);
+  const canStepToNextEvent = Boolean(panelData.queue?.length) && !playing && mode === "animate";
 
   const pS={display:"flex",gap:4,background:theme.pillBg,borderRadius:10,padding:4,border:`1px solid ${theme.pillBorder}`,alignItems:"center"};
   const bS=(acc,dng)=>({
@@ -2165,13 +2670,15 @@ export default function VoronoiVisualizer() {
     fontSize:13,fontFamily:"'DM Sans',sans-serif",fontWeight:acc?700:500,transition:"all 0.15s",
   });
   const sidebarButtonLabel = showPanel ? "Hide Sidebar" : "Open Sidebar";
+  const layoutMaxWidth = isDockedSidebar ? Math.max(1360, dockedSidebarWidth + 920) : 980;
+  const stageMaxWidth = 860;
 
   return(
     <div style={{minHeight:"100vh",background:theme.pageBg,color:theme.text,fontFamily:"'DM Sans',sans-serif",display:"flex",flexDirection:"column",alignItems:"center",padding:"20px 16px",position:"relative"}}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
-      <div style={{width:"100%",maxWidth:isDockedSidebar?1280:980,display:"grid",gridTemplateColumns:isDockedSidebar?"minmax(0, 1fr) 380px":"1fr",gap:22,alignItems:"start"}}>
+      <div style={{width:"100%",maxWidth:layoutMaxWidth,display:"grid",gridTemplateColumns:isDockedSidebar?`minmax(0, 1fr) ${dockedSidebarWidth}px`:"1fr",gap:isDockedSidebar?26:22,alignItems:"start"}}>
         <div style={{minWidth:0,display:"flex",flexDirection:"column",alignItems:"center"}}>
-          <div style={{textAlign:"center",marginBottom:14,maxWidth:860,display:"flex",alignItems:"center",justifyContent:"center",gap:12}}>
+          <div style={{textAlign:"center",marginBottom:14,maxWidth:stageMaxWidth,width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:12}}>
             <div>
             <h1 style={{fontSize:26,fontWeight:700,letterSpacing:"-0.5px",color:theme.heading,margin:"0 0 2px"}}>
               <span style={{color:theme.accent}}>◆</span> Voronoi Diagram
@@ -2189,7 +2696,7 @@ export default function VoronoiVisualizer() {
             </button>
           </div>
 
-          <div style={{width:"100%",maxWidth:860,position:"relative",borderRadius:18,overflow:"hidden",border:`1px solid ${theme.panelBorder}`,boxShadow:theme.shadow,flexShrink:0}}>
+          <div style={{width:"100%",maxWidth:stageMaxWidth,position:"relative",borderRadius:18,overflow:"hidden",border:`1px solid ${theme.panelBorder}`,boxShadow:theme.shadow,flexShrink:0}}>
             <canvas ref={cvs} width={W*dpr} height={H*dpr} onClick={onClick} onContextMenu={onCtx}
               onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
               style={{width:"min(860px,calc(100vw - 32px))",height:"auto",cursor:mode==="place"?(dragging.current?"grabbing":"crosshair"):canvasCursor,display:"block"}}/>
@@ -2206,7 +2713,7 @@ export default function VoronoiVisualizer() {
             )}
           </div>
 
-          <div style={{marginTop:14,display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center",alignItems:"center",maxWidth:860}}>
+          <div style={{marginTop:14,display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center",alignItems:"center",maxWidth:stageMaxWidth}}>
             <div style={pS}>
               {mode==="place"?(
                 <button onClick={startPlay} disabled={sites.length<2} style={{...bS(sites.length>=2),opacity:sites.length<2?0.4:1}}>▶ Play</button>
@@ -2230,7 +2737,6 @@ export default function VoronoiVisualizer() {
             </div>
 
             <div style={{...pS,padding:"6px 14px",gap:8}}>
-              <span style={{fontSize:11,color:theme.textDim,fontFamily:"'JetBrains Mono',monospace",minWidth:32}}>{speedLabel}</span>
               <input type="range" min={1} max={100} value={speed} onChange={e=>setSpeed(+e.target.value)}
                 style={{width:100,accentColor:theme.accent,cursor:"pointer"}}/>
               <span style={{fontSize:10,color:theme.textDimmer,fontFamily:"'JetBrains Mono',monospace"}}>{Math.round(pxPerSec(speed))}px/s</span>
@@ -2269,7 +2775,7 @@ export default function VoronoiVisualizer() {
             </button>
           </div>
 
-          <div style={{marginTop:16,maxWidth:860,width:"100%",display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:10,
+          <div style={{marginTop:16,maxWidth:stageMaxWidth,width:"100%",display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:10,
             fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>
             {[
               ["Algorithm",[["Type","Fortune's sweep"],["Direction","Left → Right"],["Complexity","O(n log n)"],["Beachline","Parabolic arcs"]]],
@@ -2289,12 +2795,16 @@ export default function VoronoiVisualizer() {
         {isDockedSidebar&&(
           <StructuresSidebar
             docked
+            sidebarWidth={dockedSidebarWidth}
             theme={theme}
             panelData={panelData}
             panelExpanded={panelExpanded}
             setPanelExpanded={setPanelExpanded}
-            canStepToNextEvent={Boolean(panelData.queue?.length) && !playing && mode === "animate"}
+            canStepToPreviousEvent={canStepToPreviousEvent}
+            onStepToPreviousEvent={stepToPrevious}
+            canStepToNextEvent={canStepToNextEvent}
             onStepToNextEvent={stepToNext}
+            onJumpToQueueEvent={handleJumpToQueueEvent}
             hoveredSidebarFocus={hoveredSidebarFocus}
             pinnedSidebarFocuses={pinnedSidebarFocuses}
             onPinAllFocuses={handlePinAllSidebarFocuses}
@@ -2318,12 +2828,16 @@ export default function VoronoiVisualizer() {
           <div style={{padding:12}}>
             <StructuresSidebar
               docked={false}
+              sidebarWidth={drawerSidebarWidth}
               theme={theme}
               panelData={panelData}
               panelExpanded={panelExpanded}
               setPanelExpanded={setPanelExpanded}
-              canStepToNextEvent={Boolean(panelData.queue?.length) && !playing && mode === "animate"}
+              canStepToPreviousEvent={canStepToPreviousEvent}
+              onStepToPreviousEvent={stepToPrevious}
+              canStepToNextEvent={canStepToNextEvent}
               onStepToNextEvent={stepToNext}
+              onJumpToQueueEvent={handleJumpToQueueEvent}
               hoveredSidebarFocus={hoveredSidebarFocus}
               pinnedSidebarFocuses={pinnedSidebarFocuses}
               onPinAllFocuses={handlePinAllSidebarFocuses}
