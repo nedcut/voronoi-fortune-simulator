@@ -11,3 +11,6 @@ Original prompt: Review and audit the code.
 - 2026-03-31: Tree derivation corrected to follow the lecture slide more closely. Breakpoint labels now store the lower arc's site first, and the teaching tree is built recursively over breakpoint indices instead of a hardcoded right spine.
 
 - 2026-03-31: Selection UX tightened so click acts as a lock, hover clears on node exit, and internal-node highlights now mark the represented breakpoint itself.
+- 2026-03-31: Sidebar interactivity expanded to the priority queue and DCEL, with hover/pin previews that light up pending sites, circle events, vertices, and completed edges on the canvas. Beach-tree identity was also stabilized by giving live arcs and completed edges persistent debug IDs so removed nodes clear instead of being recycled.
+- 2026-03-31: The DCEL sidebar now merges collinear edge fragments that belong to the same site pair before displaying them, so a single Voronoi edge no longer appears split at an old site-event breakpoint in the finished view.
+- 2026-03-31: Sidebar locking now supports multiple simultaneous pinned objects. Hover remains transient, clicks toggle individual locks without clearing others, and compact `All` / `None` controls were added for fast bulk selection reset.

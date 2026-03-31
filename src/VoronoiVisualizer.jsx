@@ -42,6 +42,94 @@ function breakpointY(upper, lower, sweepX) {
   return a.x < b.x ? Math.min(y1, y2) : Math.max(y1, y2);
 }
 
+function samePoint(a, b, eps = 0.75) {
+  return Math.hypot(a.x - b.x, a.y - b.y) <= eps;
+}
+
+function mergeCollinearDebugEdges(a, b, eps = 0.75) {
+  if (a.siteAId !== b.siteAId || a.siteBId !== b.siteBId) return null;
+
+  const a1 = { x: a.x1, y: a.y1 };
+  const a2 = { x: a.x2, y: a.y2 };
+  const b1 = { x: b.x1, y: b.y1 };
+  const b2 = { x: b.x2, y: b.y2 };
+
+  const sharedMatch = samePoint(a1, b1, eps) ? { shared: a1, otherA: a2, otherB: b2 }
+    : samePoint(a1, b2, eps) ? { shared: a1, otherA: a2, otherB: b1 }
+    : samePoint(a2, b1, eps) ? { shared: a2, otherA: a1, otherB: b2 }
+    : samePoint(a2, b2, eps) ? { shared: a2, otherA: a1, otherB: b1 }
+    : null;
+
+  if (!sharedMatch) return null;
+
+  const va = {
+    x: sharedMatch.otherA.x - sharedMatch.shared.x,
+    y: sharedMatch.otherA.y - sharedMatch.shared.y,
+  };
+  const vb = {
+    x: sharedMatch.otherB.x - sharedMatch.shared.x,
+    y: sharedMatch.otherB.y - sharedMatch.shared.y,
+  };
+  const lenA = Math.hypot(va.x, va.y);
+  const lenB = Math.hypot(vb.x, vb.y);
+  if (lenA < eps || lenB < eps) return null;
+
+  const cross = Math.abs(va.x * vb.y - va.y * vb.x);
+  const dot = va.x * vb.x + va.y * vb.y;
+  if (cross > eps * (lenA + lenB) || dot >= 0) return null;
+
+  const sourceIds = [...new Set([...a.sourceIds, ...b.sourceIds])].sort((x, y) => x - y);
+  return {
+    id: `edge-${sourceIds.join("-")}`,
+    sourceIds,
+    siteAId: a.siteAId,
+    siteBId: a.siteBId,
+    leftId: a.siteAId,
+    rightId: a.siteBId,
+    x1: Math.round(sharedMatch.otherA.x * 10) / 10,
+    y1: Math.round(sharedMatch.otherA.y * 10) / 10,
+    x2: Math.round(sharedMatch.otherB.x * 10) / 10,
+    y2: Math.round(sharedMatch.otherB.y * 10) / 10,
+  };
+}
+
+function mergeDebugEdges(edges) {
+  const byPair = new Map();
+  for (const edge of edges) {
+    const key = `${edge.siteAId}-${edge.siteBId}`;
+    const group = byPair.get(key);
+    if (group) group.push(edge);
+    else byPair.set(key, [edge]);
+  }
+
+  const merged = [];
+  for (const group of byPair.values()) {
+    const work = [...group];
+    let changed = true;
+    while (changed) {
+      changed = false;
+      outer:
+      for (let i = 0; i < work.length; i++) {
+        for (let j = i + 1; j < work.length; j++) {
+          const next = mergeCollinearDebugEdges(work[i], work[j]);
+          if (!next) continue;
+          work.splice(j, 1);
+          work.splice(i, 1, next);
+          changed = true;
+          break outer;
+        }
+      }
+    }
+    merged.push(...work);
+  }
+
+  return merged.sort((a, b) => {
+    if (a.siteAId !== b.siteAId) return a.siteAId - b.siteAId;
+    if (a.siteBId !== b.siteBId) return a.siteBId - b.siteBId;
+    return a.sourceIds[0] - b.sourceIds[0];
+  });
+}
+
 const SITE=0, CIRCLE=1;
 
 class FortuneAlgo {
@@ -53,6 +141,34 @@ class FortuneAlgo {
     this.queue.sort((a,b) => a.x - b.x);
     this.root = null; this.edges = []; this.vertices = [];
     this.activeCircles = [];
+    this.nextArcDebugId = 0;
+    this.nextEdgeDebugId = 0;
+  }
+
+  makeArc(site, extra = {}) {
+    return {
+      debugId: this.nextArcDebugId++,
+      site,
+      prev: null,
+      next: null,
+      circleEvent: null,
+      e0: null,
+      e1: null,
+      ...extra,
+    };
+  }
+
+  makeEdge(extra = {}) {
+    return {
+      debugId: this.nextEdgeDebugId++,
+      start: null,
+      end: null,
+      left: null,
+      right: null,
+      topSite: null,
+      botSite: null,
+      ...extra,
+    };
   }
 
   insertEvent(evt) {
@@ -117,22 +233,22 @@ class FortuneAlgo {
 
   handleSite(evt) {
     const s = evt.site;
-    if (!this.root) { this.root = { site:s, prev:null, next:null, circleEvent:null, e0:null, e1:null }; return; }
+    if (!this.root) { this.root = this.makeArc(s); return; }
     let arc = this.findArc(s.y);
     if (!arc) { arc = this.root; while (arc.next) arc = arc.next; }
     this.invalidate(arc);
-    const a = { site:arc.site, prev:arc.prev, next:null, circleEvent:null, e0:arc.e0, e1:null };
-    const b = { site:s, prev:a, next:null, circleEvent:null, e0:null, e1:null };
-    const c = { site:arc.site, prev:b, next:arc.next, circleEvent:null, e0:null, e1:arc.e1 };
+    const a = this.makeArc(arc.site, { prev:arc.prev, e0:arc.e0 });
+    const b = this.makeArc(s, { prev:a });
+    const c = this.makeArc(arc.site, { prev:b, next:arc.next, e1:arc.e1 });
     a.next = b; b.next = c;
     if (arc.prev) arc.prev.next = a;
     if (arc.next) arc.next.prev = c;
     if (this.root === arc) this.root = a;
     const sp = { x: parabolaX(arc.site, this.sweepX, s.y), y: s.y };
     // Edge between top arc (a) and new arc (b): separates a.site (above) from b.site (below)
-    const e1 = { start:{...sp}, end:null, left:arc.site, right:s, topSite:arc.site, botSite:s };
+    const e1 = this.makeEdge({ start:{...sp}, end:null, left:arc.site, right:s, topSite:arc.site, botSite:s });
     // Edge between new arc (b) and bottom arc (c): separates b.site (above) from c.site=arc.site (below)
-    const e2 = { start:{...sp}, end:null, left:s, right:arc.site, topSite:s, botSite:arc.site };
+    const e2 = this.makeEdge({ start:{...sp}, end:null, left:s, right:arc.site, topSite:s, botSite:arc.site });
     this.edges.push(e1, e2);
     a.e1 = e1; b.e0 = e1; b.e1 = e2; c.e0 = e2;
     this.checkCircle(a); this.checkCircle(c);
@@ -151,8 +267,8 @@ class FortuneAlgo {
     if (next) next.prev = prev;
     if (this.root === arc) this.root = next;
     // New edge: prev is above, next is below in beachline order
-    const e = { start:{...v}, end:null, left:prev?.site, right:next?.site,
-                topSite:prev?.site, botSite:next?.site };
+    const e = this.makeEdge({ start:{...v}, end:null, left:prev?.site, right:next?.site,
+                topSite:prev?.site, botSite:next?.site });
     this.edges.push(e);
     if (prev) prev.e1 = e;
     if (next) next.e0 = e;
@@ -247,7 +363,12 @@ class FortuneAlgo {
       const top = a.prev ? breakpointY(a.prev.site, a.site, sx) : -60;
       const bot = a.next ? breakpointY(a.site, a.next.site, sx) : this.H + 60;
       if (a.site.x < sx + 1) {
-        arcs.push({ site:a.site, yTop:Math.max(-60,top), yBot:Math.min(this.H+60,bot) });
+        arcs.push({
+          arcId: a.debugId,
+          site:a.site,
+          yTop:Math.max(-60,top),
+          yBot:Math.min(this.H+60,bot),
+        });
       }
       a = a.next;
     }
@@ -256,18 +377,39 @@ class FortuneAlgo {
 
   getEdges() {
     const bound = Math.max(this.W, this.H) * 2;
-    return this.edges.filter(e => {
-      if (!e.end) return false;
-      // Reject edges with start or end way outside the viewport
-      if (Math.abs(e.start.x) > bound || Math.abs(e.start.y) > bound) return false;
-      if (Math.abs(e.end.x) > bound || Math.abs(e.end.y) > bound) {
-        // For projected edges, check if the edge at least passes near the viewport
-        // by checking if the line segment intersects the extended viewport
-        const cl = this._clipTest(e.start.x, e.start.y, e.end.x, e.end.y, -50, -50, this.W+50, this.H+50);
-        return cl;
-      }
-      return true;
-    }).map(e => ({ x1:e.start.x, y1:e.start.y, x2:e.end.x, y2:e.end.y }));
+    const rawEdges = this.edges
+      .filter(e => {
+        if (!e.end) return false;
+        if (e.left?.id == null || e.right?.id == null) return false;
+        if (Math.abs(e.start.x) > bound || Math.abs(e.start.y) > bound) return false;
+        if (Math.abs(e.end.x) > bound || Math.abs(e.end.y) > bound) {
+          return this._clipTest(e.start.x, e.start.y, e.end.x, e.end.y, -50, -50, this.W+50, this.H+50);
+        }
+        return true;
+      })
+      .map(e => {
+        const siteAId = Math.min(e.left.id, e.right.id);
+        const siteBId = Math.max(e.left.id, e.right.id);
+        return {
+          id: `edge-${e.debugId}`,
+          sourceIds: [e.debugId],
+          siteAId,
+          siteBId,
+          leftId: siteAId,
+          rightId: siteBId,
+          x1: e.start.x,
+          y1: e.start.y,
+          x2: e.end.x,
+          y2: e.end.y,
+        };
+      });
+
+    return mergeDebugEdges(rawEdges).map(edge => ({
+      x1: edge.x1,
+      y1: edge.y1,
+      x2: edge.x2,
+      y2: edge.y2,
+    }));
   }
 
   _clipTest(x1,y1,x2,y2,xn,yn,xx,yx) {
@@ -298,18 +440,46 @@ class FortuneAlgo {
 
   getDCEL() {
     const verts = this.vertices.map((v,i) => ({ id:i, x:Math.round(v.x*10)/10, y:Math.round(v.y*10)/10 }));
-    const eds = this.edges.filter(e=>e.end).map((e,i) => ({
-      id:i, x1:Math.round(e.start.x*10)/10, y1:Math.round(e.start.y*10)/10,
-      x2:Math.round(e.end.x*10)/10, y2:Math.round(e.end.y*10)/10,
-      leftId:e.left?.id, rightId:e.right?.id,
-    }));
+    const rawEdges = this.edges
+      .filter(e => e.end && e.left?.id != null && e.right?.id != null)
+      .map(e => {
+        const siteAId = Math.min(e.left.id, e.right.id);
+        const siteBId = Math.max(e.left.id, e.right.id);
+        return {
+          id: `edge-${e.debugId}`,
+          sourceIds: [e.debugId],
+          siteAId,
+          siteBId,
+          leftId: siteAId,
+          rightId: siteBId,
+          x1: Math.round(e.start.x * 10) / 10,
+          y1: Math.round(e.start.y * 10) / 10,
+          x2: Math.round(e.end.x * 10) / 10,
+          y2: Math.round(e.end.y * 10) / 10,
+        };
+      });
+    const eds = mergeDebugEdges(rawEdges);
     const faceIds = new Set(); this.sites.forEach(s=>faceIds.add(s.id));
     return { vertexCount:verts.length, edgeCount:eds.length, faceCount:faceIds.size, vertices:verts, edges:eds };
   }
 
   getQueueContents() {
     return this.queue.filter(e=>e.type===SITE||!e.invalid).map(e=>({
-      type:e.type===SITE?"site":"circle", x:Math.round(e.x*10)/10, siteId:e.type===SITE?e.site.id:null,
+      id: e.type === SITE
+        ? `site-${e.site.id}-${Math.round(e.x * 10)}`
+        : `circle-${Math.round(e.x * 10)}-${Math.round(e.center.x * 10)}-${Math.round(e.center.y * 10)}-${Math.round(e.radius * 10)}`,
+      type:e.type===SITE?"site":"circle",
+      x:Math.round(e.x*10)/10,
+      siteId:e.type===SITE?e.site.id:null,
+      siteX:e.type===SITE?Math.round(e.site.x*10)/10:null,
+      siteY:e.type===SITE?Math.round(e.site.y*10)/10:null,
+      centerX:e.type===CIRCLE?Math.round(e.center.x*10)/10:null,
+      centerY:e.type===CIRCLE?Math.round(e.center.y*10)/10:null,
+      radius:e.type===CIRCLE?Math.round(e.radius*10)/10:null,
+      arcSiteId:e.type===CIRCLE?e.arc?.site?.id ?? null:null,
+      tripleSiteIds:e.type===CIRCLE
+        ? [e.arc?.prev?.site?.id ?? null, e.arc?.site?.id ?? null, e.arc?.next?.site?.id ?? null]
+        : null,
     }));
   }
 
@@ -325,6 +495,7 @@ class FortuneAlgo {
       const bx = parabolaX(e.topSite, renderSweepX, by);
       if (!isFinite(bx) || !isFinite(by)) continue;
       if (Math.abs(bx) > 5000 || Math.abs(by) > 5000) continue;
+      if (!this._clipTest(e.start.x, e.start.y, bx, by, -60, -60, this.W+60, this.H+60)) continue;
       // Also reject if the start point is way outside bounds
       if (Math.abs(e.start.x) > 5000 || Math.abs(e.start.y) > 5000) continue;
       results.push({ x1:e.start.x, y1:e.start.y, x2:bx, y2:by });
@@ -456,18 +627,78 @@ function sameHudState(a, b) {
     a.lastEventType === b.lastEventType;
 }
 
+function makeSidebarFocus(kind, id, payload = {}) {
+  return { kind, id, ...payload };
+}
+
+function sameSidebarFocus(a, b) {
+  return a?.kind === b?.kind && a?.id === b?.id;
+}
+
+function hasSidebarFocus(list, focus) {
+  return list?.some(item => sameSidebarFocus(item, focus)) ?? false;
+}
+
+function dedupeSidebarFocuses(list) {
+  const seen = new Set();
+  const next = [];
+  for (const focus of list ?? []) {
+    if (!focus) continue;
+    const key = `${focus.kind}:${focus.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(focus);
+  }
+  return next;
+}
+
+function buildAllSidebarFocuses(panelData) {
+  const focuses = [];
+
+  if (panelData.beach?.tree?.nodes?.length) {
+    for (const node of panelData.beach.tree.nodes) {
+      focuses.push(makeSidebarFocus("beach-node", node.id));
+    }
+  }
+
+  if (panelData.queue?.length) {
+    for (const event of panelData.queue) {
+      focuses.push(makeSidebarFocus(
+        event.type === "site" ? "queue-site" : "queue-circle",
+        event.id,
+        event
+      ));
+    }
+  }
+
+  if (panelData.dcel?.vertices?.length) {
+    for (const vertex of panelData.dcel.vertices) {
+      focuses.push(makeSidebarFocus("dcel-vertex", `vertex-${vertex.id}`, { ...vertex, vertexId: vertex.id }));
+    }
+  }
+
+  if (panelData.dcel?.edges?.length) {
+    for (const edge of panelData.dcel.edges) {
+      focuses.push(makeSidebarFocus("dcel-edge", `edge-${edge.id}`, { ...edge, edgeId: edge.id }));
+    }
+  }
+
+  return dedupeSidebarFocuses(focuses);
+}
+
 function buildBeachlineTreeDebug(arcs, sweepX) {
   if (!arcs.length) {
     return { arcs: [], breakpoints: [], tree: null, orderSummary: "" };
   }
 
   const arcItems = arcs.map((arc, index) => ({
-    id: `leaf-${index}-${arc.site.id}`,
+    id: `leaf-${arc.arcId}`,
     kind: "leaf",
     label: `s${arc.site.id}`,
     spanStart: index,
     spanEnd: index,
     leafIndex: index,
+    arcId: arc.arcId,
     siteId: arc.site.id,
     siteX: arc.site.x,
     siteY: arc.site.y,
@@ -483,7 +714,7 @@ function buildBeachlineTreeDebug(arcs, sweepX) {
     const y = breakpointY(upperSite, lowerSite, sweepX);
     const x = parabolaX(upperSite, sweepX, y);
     breakpoints.push({
-      id: `break-${i}`,
+      id: `break-${arcItems[i].arcId}-${arcItems[i + 1].arcId}`,
       index: i,
       x,
       y,
@@ -515,7 +746,7 @@ function buildBeachlineTreeDebug(arcs, sweepX) {
     const breakpoint = breakpoints[breakpointIndex];
     const leftId = buildNode(spanStart, breakpointIndex);
     const rightId = buildNode(breakpointIndex + 1, spanEnd);
-    const nodeId = `node-${spanStart}-${spanEnd}-${breakpoint.lowerSiteId}-${breakpoint.upperSiteId}-${breakpointIndex}`;
+    const nodeId = `node-${leftId}-${breakpoint.lowerSiteId}-${breakpoint.upperSiteId}-${rightId}`;
 
     nodesById[nodeId] = {
       id: nodeId,
@@ -716,8 +947,130 @@ function drawBeachlineHighlight(ctx, debug, activeNodeId, sweepX, theme, W, H) {
   ctx.restore();
 }
 
+function drawQueuedSiteHighlight(ctx, focus, H) {
+  const siteColor = col(focus.siteId);
+  ctx.save();
+  ctx.strokeStyle = siteColor;
+  ctx.fillStyle = siteColor;
+  ctx.lineWidth = 2.4;
+  ctx.setLineDash([7, 6]);
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(focus.siteX, 0);
+  ctx.lineTo(focus.siteX, H);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 0.2;
+  ctx.beginPath();
+  ctx.arc(focus.siteX, focus.siteY, 20, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.beginPath();
+  ctx.arc(focus.siteX, focus.siteY, 11, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawQueuedCircleHighlight(ctx, focus, theme, H) {
+  ctx.save();
+  ctx.strokeStyle = `rgba(${theme.circleRgb},0.95)`;
+  ctx.fillStyle = `rgba(${theme.circleDotRgb},0.95)`;
+  ctx.lineWidth = 2.2;
+  ctx.setLineDash([6, 5]);
+  ctx.beginPath();
+  ctx.arc(focus.centerX, focus.centerY, focus.radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.arc(focus.centerX, focus.centerY, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = theme.accent;
+  ctx.lineWidth = 1.6;
+  ctx.setLineDash([4, 5]);
+  ctx.globalAlpha = 0.45;
+  ctx.beginPath();
+  ctx.moveTo(focus.x, 0);
+  ctx.lineTo(focus.x, H);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawVertexHighlight(ctx, focus, theme) {
+  ctx.save();
+  ctx.strokeStyle = theme.accent;
+  ctx.fillStyle = theme.accent;
+  ctx.lineWidth = 2.4;
+  ctx.globalAlpha = 0.18;
+  ctx.beginPath();
+  ctx.arc(focus.x, focus.y, 16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.beginPath();
+  ctx.arc(focus.x, focus.y, 6.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEdgeHighlight(ctx, focus, theme) {
+  ctx.save();
+  ctx.strokeStyle = theme.accent;
+  ctx.lineWidth = 4.4;
+  ctx.globalAlpha = 0.95;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(focus.x1, focus.y1);
+  ctx.lineTo(focus.x2, focus.y2);
+  ctx.stroke();
+
+  ctx.fillStyle = theme.accent;
+  for (const point of [
+    { x: focus.x1, y: focus.y1 },
+    { x: focus.x2, y: focus.y2 },
+  ]) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSidebarFocus(ctx, focus, beachlineDebug, sweepX, theme, W, H) {
+  if (!focus) return;
+
+  if (focus.kind === "beach-node") {
+    drawBeachlineHighlight(ctx, beachlineDebug, focus.id, sweepX, theme, W, H);
+    return;
+  }
+  if (focus.kind === "queue-site") {
+    drawQueuedSiteHighlight(ctx, focus, H);
+    return;
+  }
+  if (focus.kind === "queue-circle") {
+    drawQueuedCircleHighlight(ctx, focus, theme, H);
+    return;
+  }
+  if (focus.kind === "dcel-vertex") {
+    drawVertexHighlight(ctx, focus, theme);
+    return;
+  }
+  if (focus.kind === "dcel-edge") {
+    drawEdgeHighlight(ctx, focus, theme);
+  }
+}
+
+function drawSidebarFocuses(ctx, pinnedSidebarFocuses, hoveredSidebarFocus, beachlineDebug, sweepX, theme, W, H) {
+  const pinned = dedupeSidebarFocuses(pinnedSidebarFocuses);
+  for (const focus of pinned) {
+    drawSidebarFocus(ctx, focus, beachlineDebug, sweepX, theme, W, H);
+  }
+  if (hoveredSidebarFocus && !hasSidebarFocus(pinned, hoveredSidebarFocus)) {
+    drawSidebarFocus(ctx, hoveredSidebarFocus, beachlineDebug, sweepX, theme, W, H);
+  }
+}
+
 // ─── Canvas draw ────────────────────────────────────────────────────────────
-function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme, activeBeachNodeId = null) {
+function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme, pinnedSidebarFocuses = [], hoveredSidebarFocus = null) {
   const dpr = window.devicePixelRatio||1;
   ctx.save(); ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
@@ -803,8 +1156,8 @@ function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme,
       }
     }
 
-    if (opts.beach && activeBeachNodeId && beachlineDebug) {
-      drawBeachlineHighlight(ctx, beachlineDebug, activeBeachNodeId, sx, theme, W, H);
+    if (pinnedSidebarFocuses.length || hoveredSidebarFocus) {
+      drawSidebarFocuses(ctx, pinnedSidebarFocuses, hoveredSidebarFocus, beachlineDebug, sx, theme, W, H);
     }
 
     // ── Sweep line (during animation and done mode for scrubbing) ──
@@ -878,7 +1231,7 @@ function BeachlineTreeView({
   debug,
   theme,
   activeNodeId,
-  pinnedNodeId,
+  pinnedNodeIds,
   onHoverNode,
   onLeaveTree,
   onToggleNode,
@@ -906,11 +1259,12 @@ function BeachlineTreeView({
     viewport.scrollTo({ left: nextLeft, top: nextTop, behavior });
   }, [layout]);
 
-  const focusTargetId = pinnedNodeId || activeNodeId || debug.tree.rootId;
+  const lastPinnedNodeId = pinnedNodeIds?.length ? pinnedNodeIds[pinnedNodeIds.length - 1] : null;
+  const focusTargetId = activeNodeId || lastPinnedNodeId || debug.tree.rootId;
 
   useEffect(() => {
-    if (pinnedNodeId) centerNode(pinnedNodeId, "smooth");
-  }, [pinnedNodeId, centerNode]);
+    if (lastPinnedNodeId) centerNode(lastPinnedNodeId, "smooth");
+  }, [lastPinnedNodeId, centerNode]);
 
   useEffect(() => {
     setIsPanning(false);
@@ -1031,7 +1385,7 @@ function BeachlineTreeView({
 
           {layout.nodes.map(node => {
             const isActive = node.id === activeNodeId;
-            const isPinned = node.id === pinnedNodeId;
+            const isPinned = pinnedNodeIds?.includes(node.id) ?? false;
             const isLeaf = node.kind === "leaf";
             const fill = isLeaf ? col(node.siteId) : theme.btnBg;
             const stroke = isActive || isPinned ? theme.accent : isLeaf ? fill : theme.btnBorder;
@@ -1112,16 +1466,70 @@ function PanelSection({ title, summary, expanded, onToggle, theme, children }) {
   );
 }
 
+function sidebarFocusStillExists(focus, panelData) {
+  if (!focus) return false;
+  if (focus.kind === "beach-node") {
+    return Boolean(panelData.beach?.tree?.nodesById[focus.id]);
+  }
+  if (focus.kind === "queue-site" || focus.kind === "queue-circle") {
+    return panelData.queue?.some(item => item.id === focus.id) ?? false;
+  }
+  if (focus.kind === "dcel-vertex") {
+    return panelData.dcel?.vertices.some(vertex => vertex.id === focus.vertexId) ?? false;
+  }
+  if (focus.kind === "dcel-edge") {
+    return panelData.dcel?.edges.some(edge => edge.id === focus.edgeId) ?? false;
+  }
+  return false;
+}
+
+function SidebarCard({
+  active = false,
+  pinned = false,
+  accent,
+  theme,
+  children,
+  onMouseEnter,
+  onMouseLeave,
+  onClick,
+}) {
+  return (
+    <button
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
+      onClick={onClick}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        background: active || pinned ? `${accent}14` : theme.btnBg,
+        border: `1px solid ${active || pinned ? accent : theme.panelBorder}`,
+        borderRadius: 12,
+        padding: "10px 11px",
+        cursor: "pointer",
+        transition: "all 0.15s ease",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function StructuresSidebar({
   docked,
   theme,
   panelData,
   panelExpanded,
   setPanelExpanded,
+  canStepToNextEvent,
+  onStepToNextEvent,
+  hoveredSidebarFocus,
+  pinnedSidebarFocuses,
+  onPinAllFocuses,
+  onClearPinnedFocuses,
   activeBeachNodeId,
-  pinnedBeachNodeId,
-  onHoverBeachNode,
-  onTogglePinnedBeachNode,
+  pinnedBeachNodeIds,
+  onHoverFocus,
+  onTogglePinnedFocus,
   onClose,
 }) {
   return (
@@ -1183,6 +1591,25 @@ function StructuresSidebar({
           }}>
             {panelData.beach?.tree ? `${panelData.beach.arcs.length} arcs live` : "No live tree yet"}
           </div>
+          <button onClick={onPinAllFocuses} style={{
+            background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:999,padding:"6px 10px",
+            cursor:"pointer",color:theme.textMuted,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+          }}>
+            All
+          </button>
+          <button onClick={onClearPinnedFocuses} style={{
+            background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:999,padding:"6px 10px",
+            cursor:"pointer",color:pinnedSidebarFocuses.length ? theme.textMuted : theme.textDimmer,
+            opacity:pinnedSidebarFocuses.length ? 1 : 0.5,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+          }}>
+            None
+          </button>
+          <div style={{
+            background:theme.btnBg,border:`1px solid ${theme.panelBorder}`,borderRadius:999,padding:"6px 10px",
+            color:theme.textMuted,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+          }}>
+            {pinnedSidebarFocuses.length} locked
+          </div>
         </div>
 
         <PanelSection title="Beachline Tree" theme={theme}
@@ -1192,25 +1619,89 @@ function StructuresSidebar({
             debug={panelData.beach}
             theme={theme}
             activeNodeId={activeBeachNodeId}
-            pinnedNodeId={pinnedBeachNodeId}
-            onHoverNode={onHoverBeachNode}
-            onLeaveTree={() => onHoverBeachNode(null)}
-            onToggleNode={onTogglePinnedBeachNode}
+            pinnedNodeIds={pinnedBeachNodeIds}
+            onHoverNode={nodeId => onHoverFocus(nodeId ? makeSidebarFocus("beach-node", nodeId) : null)}
+            onLeaveTree={() => onHoverFocus(null)}
+            onToggleNode={nodeId => onTogglePinnedFocus(makeSidebarFocus("beach-node", nodeId))}
           />
         </PanelSection>
 
         <PanelSection title="Priority Queue" theme={theme}
           summary={panelData.queue?`${panelData.queue.length} events`:"—"}
           expanded={panelExpanded.queue} onToggle={()=>setPanelExpanded(p=>({...p,queue:!p.queue}))}>
-          {panelData.queue&&panelData.queue.length>0&&(
-            <div>
-              {panelData.queue.slice(0,20).map((ev,i)=>(
-                <div key={i} style={{color:theme.textDim,lineHeight:1.6}}>
-                  {ev.type==="site"?<span style={{color:col(ev.siteId)}}>● site s{ev.siteId}</span>:<span>○ circle</span>}
-                  {" "}x={ev.x}
+          {panelData.queue?.length ? (
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              <div style={{display:"flex",justifyContent:"flex-start"}}>
+                <button
+                  onClick={onStepToNextEvent}
+                  disabled={!canStepToNextEvent}
+                  style={{
+                    background: theme.btnBg,
+                    border: `1px solid ${theme.btnBorder}`,
+                    borderRadius: 999,
+                    padding: "6px 10px",
+                    cursor: canStepToNextEvent ? "pointer" : "default",
+                    color: canStepToNextEvent ? theme.textMuted : theme.textDimmer,
+                    opacity: canStepToNextEvent ? 1 : 0.45,
+                    fontSize: 10,
+                    fontFamily: "'JetBrains Mono',monospace",
+                  }}
+                >
+                  Next Event →
+                </button>
+              </div>
+              <div style={{color:theme.textDim,lineHeight:1.5}}>
+                Hover an event to preview where it lands on the canvas. Click to keep that event in focus while you step the sweep.
+              </div>
+              {panelData.queue.slice(0, 16).map(ev => {
+                const focus = ev.type === "site"
+                  ? makeSidebarFocus("queue-site", ev.id, ev)
+                  : makeSidebarFocus("queue-circle", ev.id, ev);
+                const active = sameSidebarFocus(hoveredSidebarFocus, focus);
+                const pinned = hasSidebarFocus(pinnedSidebarFocuses, focus);
+                const accent = ev.type === "site" ? col(ev.siteId) : theme.accent;
+                return (
+                  <SidebarCard
+                    key={ev.id}
+                    active={active}
+                    pinned={pinned}
+                    accent={accent}
+                    theme={theme}
+                    onMouseEnter={() => onHoverFocus(focus)}
+                    onMouseLeave={() => onHoverFocus(null)}
+                    onClick={() => onTogglePinnedFocus(focus)}
+                  >
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,fontFamily:"'JetBrains Mono',monospace",fontSize:11}}>
+                        <span style={{
+                          color: ev.type === "site" ? col(ev.siteId) : theme.accent,
+                          fontWeight: 600,
+                        }}>
+                          {ev.type === "site" ? `● s${ev.siteId}` : "○ circle"}
+                        </span>
+                        <span style={{color:theme.textDim}}>x={ev.x}</span>
+                      </div>
+                      <span style={{color:pinned?accent:theme.textDimmer,fontSize:10,fontFamily:"'JetBrains Mono',monospace"}}>
+                        {pinned ? "locked" : active ? "preview" : "peek"}
+                      </span>
+                    </div>
+                    <div style={{color:theme.textMuted,fontSize:11,lineHeight:1.55,marginTop:6}}>
+                      {ev.type === "site"
+                        ? `Site at (${ev.siteX}, ${ev.siteY})`
+                        : `Center (${ev.centerX}, ${ev.centerY}) · r=${ev.radius}${ev.tripleSiteIds?.filter(id => id != null).length ? ` · sites ${ev.tripleSiteIds.filter(id => id != null).map(id => `s${id}`).join(" / ")}` : ""}`}
+                    </div>
+                  </SidebarCard>
+                );
+              })}
+              {panelData.queue.length > 16 && (
+                <div style={{color:theme.textDimmer,fontSize:11}}>
+                  ...+{panelData.queue.length - 16} more events queued
                 </div>
-              ))}
-              {panelData.queue.length>20&&<div style={{color:theme.textDimmer}}>...+{panelData.queue.length-20} more</div>}
+              )}
+            </div>
+          ) : (
+            <div style={{color:theme.textDim,lineHeight:1.6}}>
+              No pending events right now.
             </div>
           )}
         </PanelSection>
@@ -1218,30 +1709,98 @@ function StructuresSidebar({
         <PanelSection title="DCEL" theme={theme}
           summary={panelData.dcel?`${panelData.dcel.vertexCount}V · ${panelData.dcel.edgeCount}E · ${panelData.dcel.faceCount}F`:"—"}
           expanded={panelExpanded.dcel} onToggle={()=>setPanelExpanded(p=>({...p,dcel:!p.dcel}))}>
-          {panelData.dcel&&(
-            <>
-              {panelData.dcel.vertices.length>0&&(
-                <div style={{marginBottom:4}}>
-                  <div style={{color:theme.textMuted,marginBottom:2}}>Vertices:</div>
-                  {panelData.dcel.vertices.slice(0,20).map(v=>(
-                    <div key={v.id} style={{color:theme.textDim,lineHeight:1.6}}>v{v.id}: ({v.x}, {v.y})</div>
-                  ))}
-                  {panelData.dcel.vertices.length>20&&<div style={{color:theme.textDimmer}}>...+{panelData.dcel.vertices.length-20} more</div>}
+          {panelData.dcel ? (
+            <div style={{display:"grid",gap:10}}>
+              <div style={{color:theme.textDim,lineHeight:1.5}}>
+                Inspect the geometry that has already solidified. Vertices ring their Voronoi corner; edges brighten on the canvas.
+              </div>
+
+              <div>
+                <div style={{color:theme.textMuted,marginBottom:6,fontSize:11,textTransform:"uppercase",letterSpacing:"0.04em"}}>
+                  Vertices
                 </div>
-              )}
-              {panelData.dcel.edges.length>0&&(
-                <div>
-                  <div style={{color:theme.textMuted,marginBottom:2}}>Edges:</div>
-                  {panelData.dcel.edges.slice(0,15).map(e=>(
-                    <div key={e.id} style={{color:theme.textDim,lineHeight:1.6}}>
-                      e{e.id}: <span style={{color:col(e.leftId)}}>s{e.leftId}</span>|<span style={{color:col(e.rightId)}}>s{e.rightId}</span>
+                <div style={{display:"grid",gap:7}}>
+                  {panelData.dcel.vertices.length ? panelData.dcel.vertices.slice(0, 12).map(vertex => {
+                    const focus = makeSidebarFocus("dcel-vertex", `vertex-${vertex.id}`, { ...vertex, vertexId: vertex.id });
+                    const active = sameSidebarFocus(hoveredSidebarFocus, focus);
+                    const pinned = hasSidebarFocus(pinnedSidebarFocuses, focus);
+                    return (
+                      <SidebarCard
+                        key={vertex.id}
+                        active={active}
+                        pinned={pinned}
+                        accent={theme.accent}
+                        theme={theme}
+                        onMouseEnter={() => onHoverFocus(focus)}
+                        onMouseLeave={() => onHoverFocus(null)}
+                        onClick={() => onTogglePinnedFocus(focus)}
+                      >
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                          <span style={{color:theme.text,fontFamily:"'JetBrains Mono',monospace",fontSize:11}}>v{vertex.id}</span>
+                          <span style={{color:theme.textDim,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>
+                            ({vertex.x}, {vertex.y})
+                          </span>
+                        </div>
+                      </SidebarCard>
+                    );
+                  }) : (
+                    <div style={{color:theme.textDim,lineHeight:1.6}}>No vertices have formed yet.</div>
+                  )}
+                  {panelData.dcel.vertices.length > 12 && (
+                    <div style={{color:theme.textDimmer,fontSize:11}}>
+                      ...+{panelData.dcel.vertices.length - 12} more vertices
                     </div>
-                  ))}
-                  {panelData.dcel.edges.length>15&&<div style={{color:theme.textDimmer}}>...+{panelData.dcel.edges.length-15} more</div>}
+                  )}
                 </div>
-              )}
-            </>
-          )}
+              </div>
+
+              <div>
+                <div style={{color:theme.textMuted,marginBottom:6,fontSize:11,textTransform:"uppercase",letterSpacing:"0.04em"}}>
+                  Edges
+                </div>
+                <div style={{display:"grid",gap:7}}>
+                  {panelData.dcel.edges.length ? panelData.dcel.edges.slice(0, 12).map(edge => {
+                    const focus = makeSidebarFocus("dcel-edge", `edge-${edge.id}`, { ...edge, edgeId: edge.id });
+                    const active = sameSidebarFocus(hoveredSidebarFocus, focus);
+                    const pinned = hasSidebarFocus(pinnedSidebarFocuses, focus);
+                    return (
+                      <SidebarCard
+                        key={edge.id}
+                        active={active}
+                        pinned={pinned}
+                        accent={theme.accent}
+                        theme={theme}
+                        onMouseEnter={() => onHoverFocus(focus)}
+                        onMouseLeave={() => onHoverFocus(null)}
+                        onClick={() => onTogglePinnedFocus(focus)}
+                      >
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                          <span style={{color:theme.text,fontFamily:"'JetBrains Mono',monospace",fontSize:11}}>e{edge.id}</span>
+                          <span style={{color:theme.textDim,fontFamily:"'JetBrains Mono',monospace",fontSize:10}}>
+                            {Math.hypot(edge.x2 - edge.x1, edge.y2 - edge.y1).toFixed(1)}px
+                          </span>
+                        </div>
+                        <div style={{color:theme.textMuted,fontSize:11,lineHeight:1.55,marginTop:6}}>
+                          <span style={{color:col(edge.leftId ?? 0)}}>s{edge.leftId ?? "?"}</span>
+                          {" | "}
+                          <span style={{color:col(edge.rightId ?? 0)}}>s{edge.rightId ?? "?"}</span>
+                          {" · "}
+                          ({edge.x1}, {edge.y1}) → ({edge.x2}, {edge.y2})
+                        </div>
+                      </SidebarCard>
+                    );
+                  }) : (
+                    <div style={{color:theme.textDim,lineHeight:1.6}}>No completed edges yet.</div>
+                  )}
+                  {panelData.dcel.edges.length > 12 && (
+                    <div style={{color:theme.textDimmer,fontSize:11}}>
+                      ...+{panelData.dcel.edges.length - 12} more edges
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
         </PanelSection>
       </div>
     </aside>
@@ -1263,8 +1822,8 @@ export default function VoronoiVisualizer() {
   const [showPanel, setShowPanel] = useState(true);
   const [panelExpanded, setPanelExpanded] = useState({ dcel:false, queue:false, beach:true });
   const [panelData, setPanelData] = useState({ dcel:null, queue:null, beach:null });
-  const [hoveredBeachNodeId, setHoveredBeachNodeId] = useState(null);
-  const [pinnedBeachNodeId, setPinnedBeachNodeId] = useState(null);
+  const [hoveredSidebarFocus, setHoveredSidebarFocus] = useState(null);
+  const [pinnedSidebarFocuses, setPinnedSidebarFocuses] = useState([]);
   const [viewportWidth, setViewportWidth] = useState(() => typeof window === "undefined" ? 1440 : window.innerWidth);
   const theme = darkMode ? THEMES.dark : THEMES.light;
 
@@ -1277,7 +1836,10 @@ export default function VoronoiVisualizer() {
   const dragging = useRef(null); // { index, startX, startY, moved }
   const sweepDragging = useRef(false); // true when dragging the sweep line
   const [canvasCursor, setCanvasCursor] = useState("crosshair");
-  const activeBeachNodeId = pinnedBeachNodeId || hoveredBeachNodeId;
+  const activeBeachNodeId = hoveredSidebarFocus?.kind === "beach-node" ? hoveredSidebarFocus.id : null;
+  const pinnedBeachNodeIds = pinnedSidebarFocuses
+    .filter(focus => focus.kind === "beach-node")
+    .map(focus => focus.id);
   const isDockedSidebar = showPanel && viewportWidth >= 1220;
   const isDrawerSidebar = showPanel && !isDockedSidebar;
 
@@ -1304,8 +1866,8 @@ export default function VoronoiVisualizer() {
     syncHud(algo, targetX);
     const c = cvs.current; if (!c) return;
     draw(c.getContext("2d"), W, H, sites, algo, targetX,
-      {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges}, prev.current, "animate", theme, activeBeachNodeId);
-  }, [sites, showSweep, showBeach, showCircles, showEdges, syncHud, theme, activeBeachNodeId]);
+      {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges}, prev.current, "animate", theme, pinnedSidebarFocuses, hoveredSidebarFocus);
+  }, [sites, showSweep, showBeach, showCircles, showEdges, syncHud, theme, pinnedSidebarFocuses, hoveredSidebarFocus]);
 
   // Scrub to any x position — goes forward if possible, rebuilds if backward
   const scrubTo = useCallback((targetX) => {
@@ -1318,12 +1880,12 @@ export default function VoronoiVisualizer() {
       syncHud(algo, clamped);
       const c = cvs.current; if (!c) return;
       draw(c.getContext("2d"), W, H, sites, algo, clamped,
-        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges}, prev.current, "animate", theme, activeBeachNodeId);
+        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges}, prev.current, "animate", theme, pinnedSidebarFocuses, hoveredSidebarFocus);
     } else {
       // Backward (or algo was done): must replay from scratch
       rebuildTo(clamped);
     }
-  }, [sites, showSweep, showBeach, showCircles, showEdges, syncHud, theme, rebuildTo, activeBeachNodeId]);
+  }, [sites, showSweep, showBeach, showCircles, showEdges, syncHud, theme, rebuildTo, pinnedSidebarFocuses, hoveredSidebarFocus]);
 
   // Update panel data when HUD changes (event boundaries) and panel is visible
   useEffect(() => {
@@ -1337,34 +1899,39 @@ export default function VoronoiVisualizer() {
   }, [hud, showPanel]);
 
   useEffect(() => {
-    if (!panelData.beach?.tree) {
-      if (hoveredBeachNodeId) setHoveredBeachNodeId(null);
-      if (pinnedBeachNodeId) setPinnedBeachNodeId(null);
-      return;
+    if (hoveredSidebarFocus && !sidebarFocusStillExists(hoveredSidebarFocus, panelData)) {
+      setHoveredSidebarFocus(null);
     }
-    if (hoveredBeachNodeId && !panelData.beach.tree.nodesById[hoveredBeachNodeId]) {
-      setHoveredBeachNodeId(null);
-    }
-    if (pinnedBeachNodeId && !panelData.beach.tree.nodesById[pinnedBeachNodeId]) {
-      setPinnedBeachNodeId(null);
-    }
-  }, [panelData.beach, hoveredBeachNodeId, pinnedBeachNodeId]);
+    setPinnedSidebarFocuses(current => {
+      const filtered = current.filter(focus => sidebarFocusStillExists(focus, panelData));
+      return filtered.length === current.length ? current : filtered;
+    });
+  }, [panelData, hoveredSidebarFocus]);
 
   useEffect(() => {
     if (!showPanel) {
-      setHoveredBeachNodeId(null);
-      setPinnedBeachNodeId(null);
+      setHoveredSidebarFocus(null);
+      setPinnedSidebarFocuses([]);
     }
   }, [showPanel]);
 
-  const handleHoverBeachNode = useCallback(nodeId => {
-    if (pinnedBeachNodeId) return;
-    setHoveredBeachNodeId(nodeId);
-  }, [pinnedBeachNodeId]);
+  const handleHoverSidebarFocus = useCallback(focus => {
+    setHoveredSidebarFocus(focus);
+  }, []);
 
-  const handleTogglePinnedBeachNode = useCallback(nodeId => {
-    setPinnedBeachNodeId(current => current === nodeId ? null : nodeId);
-    setHoveredBeachNodeId(null);
+  const handleTogglePinnedSidebarFocus = useCallback(focus => {
+    setPinnedSidebarFocuses(current => hasSidebarFocus(current, focus)
+      ? current.filter(item => !sameSidebarFocus(item, focus))
+      : [...current, focus]
+    );
+  }, []);
+
+  const handleClearPinnedSidebarFocuses = useCallback(() => {
+    setPinnedSidebarFocuses([]);
+  }, []);
+
+  const handlePinAllSidebarFocuses = useCallback(() => {
+    setPinnedSidebarFocuses(buildAllSidebarFocuses(panelData));
   }, []);
 
   function pxPerSec(s) {
@@ -1382,9 +1949,9 @@ export default function VoronoiVisualizer() {
     if (mode==="place"||mode==="done") {
       const c=cvs.current; if(!c)return;
       draw(c.getContext("2d"),W,H,sites,alg.current,sweepXRef.current,
-        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,activeBeachNodeId);
+        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,pinnedSidebarFocuses,hoveredSidebarFocus);
     }
-  }, [sites,mode,showSweep,showBeach,showCircles,showEdges,theme,activeBeachNodeId]);
+  }, [sites,mode,showSweep,showBeach,showCircles,showEdges,theme,pinnedSidebarFocuses,hoveredSidebarFocus]);
 
   // Continuous animation
   useEffect(() => {
@@ -1408,26 +1975,26 @@ export default function VoronoiVisualizer() {
         setMode("done"); setPlaying(false);
         const c=cvs.current;
         if(c) draw(c.getContext("2d"),W,H,sites,algo,sweepXRef.current,
-          {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,"done",theme,activeBeachNodeId);
+          {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,"done",theme,pinnedSidebarFocuses,hoveredSidebarFocus);
         return;
       }
       const c=cvs.current;
       if(c) draw(c.getContext("2d"),W,H,sites,algo,newX,
-        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,activeBeachNodeId);
+        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,pinnedSidebarFocuses,hoveredSidebarFocus);
       anim.current = requestAnimationFrame(loop);
     };
     anim.current = requestAnimationFrame(loop);
     return()=>{running=false;cancelAnimationFrame(anim.current);};
-  },[playing,mode,speed,sites,showSweep,showBeach,showCircles,showEdges,theme,activeBeachNodeId]);
+  },[playing,mode,speed,sites,showSweep,showBeach,showCircles,showEdges,theme,pinnedSidebarFocuses,hoveredSidebarFocus]);
 
   // Paused redraw
   useEffect(() => {
     if (mode==="animate"&&!playing) {
       const c=cvs.current; if(!c)return;
       draw(c.getContext("2d"),W,H,sites,alg.current,sweepXRef.current,
-        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,activeBeachNodeId);
+        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,pinnedSidebarFocuses,hoveredSidebarFocus);
     }
-  },[mode,playing,showSweep,showBeach,showCircles,showEdges,theme,activeBeachNodeId]);
+  },[mode,playing,showSweep,showBeach,showCircles,showEdges,theme,pinnedSidebarFocuses,hoveredSidebarFocus]);
 
   const onClick=useCallback(e=>{
     // Suppress click after sweep line drag
@@ -1450,7 +2017,7 @@ export default function VoronoiVisualizer() {
       const c=cvs.current; if(!c)return;
       draw(c.getContext("2d"),W,H,sites,algo,sweepXRef.current,
         {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,
-        algo.done?"done":"animate",theme,activeBeachNodeId);
+        algo.done?"done":"animate",theme,pinnedSidebarFocuses,hoveredSidebarFocus);
       if(algo.done){setMode("done");setPlaying(false);}
       return;
     }
@@ -1463,7 +2030,7 @@ export default function VoronoiVisualizer() {
     }
     if(x<5||x>W-5||y<5||y>H-5)return;
     setSites(p => appendSites(p, [{ x, y }]));
-  },[mode,sites,playing,showSweep,showBeach,showCircles,showEdges,syncHud,theme,activeBeachNodeId]);
+  },[mode,sites,playing,showSweep,showBeach,showCircles,showEdges,syncHud,theme,pinnedSidebarFocuses,hoveredSidebarFocus]);
 
   const onCtx=useCallback(e=>{
     e.preventDefault(); if(mode!=="place")return;
@@ -1544,9 +2111,9 @@ export default function VoronoiVisualizer() {
     const c=cvs.current; if(!c)return;
     draw(c.getContext("2d"),W,H,sites,algo,sweepXRef.current,
       {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,
-      algo.done?"done":"animate",theme,activeBeachNodeId);
+      algo.done?"done":"animate",theme,pinnedSidebarFocuses,hoveredSidebarFocus);
     if(algo.done){setMode("done");setPlaying(false);}
-  },[sites,showSweep,showBeach,showCircles,showEdges,syncHud,theme,activeBeachNodeId]);
+  },[sites,showSweep,showBeach,showCircles,showEdges,syncHud,theme,pinnedSidebarFocuses,hoveredSidebarFocus]);
 
   const stepPx=useCallback((delta)=>{
     if(!alg.current)return;
@@ -1574,8 +2141,8 @@ export default function VoronoiVisualizer() {
   const reset=useCallback(()=>{
     setPlaying(false);cancelAnimationFrame(anim.current);
     alg.current=null;sweepXRef.current=0;prevTimestamp.current=0;
-    setHoveredBeachNodeId(null);
-    setPinnedBeachNodeId(null);
+    setHoveredSidebarFocus(null);
+    setPinnedSidebarFocuses([]);
     syncHud(null, 0);
     setMode("place");
   },[syncHud]);
@@ -1726,10 +2293,16 @@ export default function VoronoiVisualizer() {
             panelData={panelData}
             panelExpanded={panelExpanded}
             setPanelExpanded={setPanelExpanded}
+            canStepToNextEvent={Boolean(panelData.queue?.length) && !playing && mode === "animate"}
+            onStepToNextEvent={stepToNext}
+            hoveredSidebarFocus={hoveredSidebarFocus}
+            pinnedSidebarFocuses={pinnedSidebarFocuses}
+            onPinAllFocuses={handlePinAllSidebarFocuses}
+            onClearPinnedFocuses={handleClearPinnedSidebarFocuses}
             activeBeachNodeId={activeBeachNodeId}
-            pinnedBeachNodeId={pinnedBeachNodeId}
-            onHoverBeachNode={handleHoverBeachNode}
-            onTogglePinnedBeachNode={handleTogglePinnedBeachNode}
+            pinnedBeachNodeIds={pinnedBeachNodeIds}
+            onHoverFocus={handleHoverSidebarFocus}
+            onTogglePinnedFocus={handleTogglePinnedSidebarFocus}
             onClose={() => setShowPanel(false)}
           />
         )}
@@ -1749,10 +2322,16 @@ export default function VoronoiVisualizer() {
               panelData={panelData}
               panelExpanded={panelExpanded}
               setPanelExpanded={setPanelExpanded}
+              canStepToNextEvent={Boolean(panelData.queue?.length) && !playing && mode === "animate"}
+              onStepToNextEvent={stepToNext}
+              hoveredSidebarFocus={hoveredSidebarFocus}
+              pinnedSidebarFocuses={pinnedSidebarFocuses}
+              onPinAllFocuses={handlePinAllSidebarFocuses}
+              onClearPinnedFocuses={handleClearPinnedSidebarFocuses}
               activeBeachNodeId={activeBeachNodeId}
-              pinnedBeachNodeId={pinnedBeachNodeId}
-              onHoverBeachNode={handleHoverBeachNode}
-              onTogglePinnedBeachNode={handleTogglePinnedBeachNode}
+              pinnedBeachNodeIds={pinnedBeachNodeIds}
+              onHoverFocus={handleHoverSidebarFocus}
+              onTogglePinnedFocus={handleTogglePinnedSidebarFocus}
               onClose={() => setShowPanel(false)}
             />
           </div>
