@@ -489,7 +489,7 @@ function buildBeachlineTreeDebug(arcs, sweepX) {
       y,
       upperSiteId: upperSite.id,
       lowerSiteId: lowerSite.id,
-      label: `(s${upperSite.id},s${lowerSite.id})`,
+      label: `(s${lowerSite.id},s${upperSite.id})`,
     });
   }
 
@@ -507,25 +507,24 @@ function buildBeachlineTreeDebug(arcs, sweepX) {
     };
   }
 
-  let rootId = arcItems[arcItems.length - 1].id;
-  for (let i = arcItems.length - 2; i >= 0; i--) {
-    const leftId = arcItems[i].id;
-    const rightId = rootId;
-    const leftNode = nodesById[leftId];
-    const rightNode = nodesById[rightId];
-    const spanStart = leftNode.spanStart;
-    const spanEnd = rightNode.spanEnd;
-    const splitIndex = leftNode.spanEnd;
-    const leftSiteId = arcItems[leftNode.spanEnd].siteId;
-    const rightSiteId = arcItems[rightNode.spanStart].siteId;
-    const nodeId = `node-${spanStart}-${spanEnd}-${leftSiteId}-${rightSiteId}`;
+  const buildNode = (spanStart, spanEnd) => {
+    if (spanStart === spanEnd) return arcItems[spanStart].id;
+
+    // Build a balanced teaching tree from the ordered breakpoint sequence.
+    const breakpointIndex = Math.floor((spanStart + spanEnd - 1) / 2);
+    const breakpoint = breakpoints[breakpointIndex];
+    const leftId = buildNode(spanStart, breakpointIndex);
+    const rightId = buildNode(breakpointIndex + 1, spanEnd);
+    const nodeId = `node-${spanStart}-${spanEnd}-${breakpoint.lowerSiteId}-${breakpoint.upperSiteId}-${breakpointIndex}`;
+
     nodesById[nodeId] = {
       id: nodeId,
       kind: "internal",
-      label: `(s${leftSiteId},s${rightSiteId})`,
+      label: breakpoint.label,
       spanStart,
       spanEnd,
-      splitIndex,
+      splitIndex: breakpointIndex,
+      breakpointIndex,
       leftId,
       rightId,
       depth: 0,
@@ -534,8 +533,11 @@ function buildBeachlineTreeDebug(arcs, sweepX) {
         index => index >= 0 && index < breakpoints.length
       ),
     };
-    rootId = nodeId;
-  }
+
+    return nodeId;
+  };
+
+  const rootId = buildNode(0, arcItems.length - 1);
 
   let maxDepth = 0;
   const assignDepth = (nodeId, depth) => {
@@ -655,19 +657,21 @@ function drawBeachlineHighlight(ctx, debug, activeNodeId, sweepX, theme, W, H) {
 
   const highlightArcs = debug.arcs.slice(node.spanStart, node.spanEnd + 1);
   for (const arc of highlightArcs) {
-    drawArcStroke(ctx, arc, sweepX, W, H, theme.accent, node.kind === "leaf" ? 5.5 : 4.5, node.kind === "leaf" ? 0.95 : 0.75);
+    const arcColor = col(arc.site.id);
+    drawArcStroke(ctx, arc, sweepX, W, H, arcColor, node.kind === "leaf" ? 5.8 : 4.8, node.kind === "leaf" ? 1 : 0.95);
   }
 
   if (node.kind === "leaf") {
+    const siteColor = col(node.siteId);
     ctx.save();
-    ctx.strokeStyle = theme.accent;
+    ctx.strokeStyle = siteColor;
     ctx.lineWidth = 2;
-    ctx.globalAlpha = 0.9;
+    ctx.globalAlpha = 1;
     ctx.beginPath();
     ctx.arc(node.siteX, node.siteY, 12, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.fillStyle = theme.accent;
-    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = siteColor;
+    ctx.globalAlpha = 0.22;
     ctx.beginPath();
     ctx.arc(node.siteX, node.siteY, 18, 0, Math.PI * 2);
     ctx.fill();
@@ -678,16 +682,35 @@ function drawBeachlineHighlight(ctx, debug, activeNodeId, sweepX, theme, W, H) {
   const boundaryBreakpoints = node.boundaryBreakpointIndices
     .map(index => debug.breakpoints[index])
     .filter(point => point && isFinite(point.x) && isFinite(point.y));
-  if (!boundaryBreakpoints.length) return;
+  const splitPoint = debug.breakpoints[node.breakpointIndex];
 
   ctx.save();
-  ctx.fillStyle = theme.accent;
+  const boundaryColor = col(debug.arcs[node.spanStart].site.id);
+  ctx.fillStyle = boundaryColor;
   ctx.strokeStyle = theme.bg;
   ctx.lineWidth = 2;
   for (const point of boundaryBreakpoints) {
     ctx.beginPath();
     ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
     ctx.fill();
+    ctx.stroke();
+  }
+  if (splitPoint && isFinite(splitPoint.x) && isFinite(splitPoint.y)) {
+    const splitColor = col(splitPoint.lowerSiteId);
+    ctx.fillStyle = splitColor;
+    ctx.strokeStyle = theme.siteDot;
+    ctx.lineWidth = 2.5;
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(splitPoint.x, splitPoint.y, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = splitColor;
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(splitPoint.x, splitPoint.y, 12, 0, Math.PI * 2);
     ctx.stroke();
   }
   ctx.restore();
@@ -869,19 +892,128 @@ function BeachlineTreeView({
   }
 
   const layout = useMemo(() => layoutBeachlineTree(debug.tree), [debug.tree]);
+  const viewportRef = useRef(null);
+  const panStateRef = useRef(null);
+  const [isPanning, setIsPanning] = useState(false);
   if (!layout) return null;
+
+  const centerNode = useCallback((nodeId, behavior = "smooth") => {
+    const viewport = viewportRef.current;
+    const node = layout.nodesById[nodeId];
+    if (!viewport || !node) return;
+    const nextLeft = Math.max(0, Math.min(node.x - viewport.clientWidth / 2, viewport.scrollWidth - viewport.clientWidth));
+    const nextTop = Math.max(0, Math.min(node.y - viewport.clientHeight / 2, viewport.scrollHeight - viewport.clientHeight));
+    viewport.scrollTo({ left: nextLeft, top: nextTop, behavior });
+  }, [layout]);
+
+  const focusTargetId = pinnedNodeId || activeNodeId || debug.tree.rootId;
+
+  useEffect(() => {
+    if (pinnedNodeId) centerNode(pinnedNodeId, "smooth");
+  }, [pinnedNodeId, centerNode]);
+
+  useEffect(() => {
+    setIsPanning(false);
+    panStateRef.current = null;
+    const viewport = viewportRef.current;
+    if (viewport) viewport.scrollTo({ left: 0, top: 0, behavior: "auto" });
+  }, [debug.tree.rootId]);
+
+  useEffect(() => {
+    if (!isPanning) return;
+    const handleMove = event => {
+      const viewport = viewportRef.current;
+      const state = panStateRef.current;
+      if (!viewport || !state) return;
+      viewport.scrollLeft = state.scrollLeft - (event.clientX - state.startX);
+      viewport.scrollTop = state.scrollTop - (event.clientY - state.startY);
+    };
+    const handleUp = () => {
+      setIsPanning(false);
+      panStateRef.current = null;
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [isPanning]);
+
+  const beginPan = useCallback(event => {
+    if (event.button !== 0) return;
+    if (!(event.target instanceof SVGSVGElement)) return;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    panStateRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+    };
+    setIsPanning(true);
+  }, []);
+
+  const handleWheel = useCallback(event => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    if (event.shiftKey) {
+      event.preventDefault();
+      viewport.scrollLeft += event.deltaY;
+      return;
+    }
+    if (layout.width > viewport.clientWidth) {
+      viewport.scrollLeft += event.deltaX * 0.9;
+    }
+  }, [layout.width]);
 
   return (
     <div onMouseLeave={onLeaveTree}>
-      <div style={{ color: theme.textDim, lineHeight: 1.5, marginBottom: 8 }}>
-        Hover a node to preview its beachline span. Click to pin the highlight.
+      <div style={{ color: theme.textDim, lineHeight: 1.5, marginBottom: 10 }}>
+        Hover for a quick preview. Click a node to lock it on, then drag or shift-scroll to pan the tree.
       </div>
-      <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:8}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          <button onClick={() => centerNode(debug.tree.rootId)} style={{
+            background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:999,padding:"5px 9px",
+            cursor:"pointer",color:theme.textMuted,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+          }}>
+            Root
+          </button>
+          <button onClick={() => focusTargetId && centerNode(focusTargetId)} style={{
+            background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:999,padding:"5px 9px",
+            cursor:"pointer",color:theme.textMuted,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+          }}>
+            Center Selection
+          </button>
+        </div>
+        <div style={{color:theme.textDimmer,fontSize:10}}>Pan: drag empty space</div>
+      </div>
+      <div style={{
+        position:"relative",
+        border:`1px solid ${theme.panelBorder}`,
+        borderRadius:14,
+        background:`linear-gradient(180deg, ${theme.btnBg} 0%, ${theme.panelBg} 100%)`,
+        padding:10,
+      }}>
+        <div
+          ref={viewportRef}
+          onWheel={handleWheel}
+          style={{
+            overflow:"auto",
+            maxHeight:320,
+            paddingBottom:4,
+            scrollBehavior:"smooth",
+            overscrollBehavior:"contain",
+            cursor:isPanning ? "grabbing" : (layout.width > 260 || layout.height > 220 ? "grab" : "default"),
+          }}
+        >
         <svg
           width={layout.width}
           height={layout.height}
           viewBox={`0 0 ${layout.width} ${layout.height}`}
           style={{ display: "block" }}
+          onMouseDown={beginPan}
         >
           {layout.nodes
             .filter(node => node.kind === "internal")
@@ -910,6 +1042,7 @@ function BeachlineTreeView({
                 transform={`translate(${node.x - node.boxWidth / 2} ${node.y - node.boxHeight / 2})`}
                 style={{ cursor: "pointer" }}
                 onMouseEnter={() => onHoverNode(node.id)}
+                onMouseLeave={() => onHoverNode(null)}
                 onClick={() => onToggleNode(node.id)}
               >
                 <rect
@@ -940,8 +1073,26 @@ function BeachlineTreeView({
           })}
         </svg>
       </div>
-      <div style={{ color: theme.textMuted, marginTop: 6, marginBottom: 2 }}>Order:</div>
-      <div style={{ color: theme.textDim, lineHeight: 1.6 }}>{debug.orderSummary}</div>
+        <div style={{
+          pointerEvents:"none",
+          position:"absolute",
+          inset:1,
+          borderRadius:13,
+          boxShadow:`inset 0 18px 24px -24px ${theme.pageBg}, inset 0 -18px 24px -24px ${theme.pageBg}`,
+        }}/>
+      </div>
+      <div style={{ color: theme.textMuted, marginTop: 10, marginBottom: 4 }}>Order:</div>
+      <div style={{
+        color: theme.textDim,
+        lineHeight: 1.6,
+        background: theme.btnBg,
+        border:`1px solid ${theme.panelBorder}`,
+        borderRadius:12,
+        padding:"8px 10px",
+        overflowX:"auto",
+      }}>
+        {debug.orderSummary}
+      </div>
     </div>
   );
 }
@@ -961,6 +1112,142 @@ function PanelSection({ title, summary, expanded, onToggle, theme, children }) {
   );
 }
 
+function StructuresSidebar({
+  docked,
+  theme,
+  panelData,
+  panelExpanded,
+  setPanelExpanded,
+  activeBeachNodeId,
+  pinnedBeachNodeId,
+  onHoverBeachNode,
+  onTogglePinnedBeachNode,
+  onClose,
+}) {
+  return (
+    <aside style={{
+      width: docked ? 380 : "min(400px, calc(100vw - 24px))",
+      maxHeight: docked ? "calc(100vh - 40px)" : "calc(100vh - 24px)",
+      background: theme.panelBg,
+      border: `1px solid ${theme.panelBorder}`,
+      borderRadius: 20,
+      boxShadow: theme.shadow,
+      overflow: "hidden",
+      display: "flex",
+      flexDirection: "column",
+      position: docked ? "sticky" : "relative",
+      top: docked ? 20 : undefined,
+    }}>
+      <div style={{
+        padding:"16px 16px 14px",
+        borderBottom:`1px solid ${theme.panelBorder}`,
+        background:`linear-gradient(180deg, ${theme.btnBg} 0%, ${theme.panelBg} 100%)`,
+      }}>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+          <div>
+            <div style={{fontFamily:"'DM Sans',sans-serif",fontWeight:700,fontSize:16,color:theme.heading}}>
+              Structures Sidebar
+            </div>
+            <div style={{color:theme.textDim,fontSize:12,lineHeight:1.5,marginTop:4}}>
+              Live geometry and breakpoint state while you step, jump, or scrub the sweep.
+            </div>
+          </div>
+          <button onClick={onClose} style={{
+            background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:10,padding:"6px 10px",
+            cursor:"pointer",color:theme.textMuted,fontSize:11,fontFamily:"'JetBrains Mono',monospace"
+          }}>
+            Close
+          </button>
+        </div>
+      </div>
+
+      <div style={{
+        padding:"12px 14px 14px",
+        overflowY:"auto",
+        display:"flex",
+        flexDirection:"column",
+        gap:10,
+        scrollBehavior:"smooth",
+        overscrollBehavior:"contain",
+      }}>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <div style={{
+            background:theme.btnBg,border:`1px solid ${theme.panelBorder}`,borderRadius:999,padding:"6px 10px",
+            color:theme.textMuted,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+          }}>
+            {panelData.queue ? `${panelData.queue.length} queued` : "Queue idle"}
+          </div>
+          <div style={{
+            background:theme.btnBg,border:`1px solid ${theme.panelBorder}`,borderRadius:999,padding:"6px 10px",
+            color:theme.textMuted,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+          }}>
+            {panelData.beach?.tree ? `${panelData.beach.arcs.length} arcs live` : "No live tree yet"}
+          </div>
+        </div>
+
+        <PanelSection title="Beachline Tree" theme={theme}
+          summary={panelData.beach?.tree?`${panelData.beach.arcs.length} arcs · ${panelData.beach.breakpoints.length} breaks`:"—"}
+          expanded={panelExpanded.beach} onToggle={()=>setPanelExpanded(p=>({...p,beach:!p.beach}))}>
+          <BeachlineTreeView
+            debug={panelData.beach}
+            theme={theme}
+            activeNodeId={activeBeachNodeId}
+            pinnedNodeId={pinnedBeachNodeId}
+            onHoverNode={onHoverBeachNode}
+            onLeaveTree={() => onHoverBeachNode(null)}
+            onToggleNode={onTogglePinnedBeachNode}
+          />
+        </PanelSection>
+
+        <PanelSection title="Priority Queue" theme={theme}
+          summary={panelData.queue?`${panelData.queue.length} events`:"—"}
+          expanded={panelExpanded.queue} onToggle={()=>setPanelExpanded(p=>({...p,queue:!p.queue}))}>
+          {panelData.queue&&panelData.queue.length>0&&(
+            <div>
+              {panelData.queue.slice(0,20).map((ev,i)=>(
+                <div key={i} style={{color:theme.textDim,lineHeight:1.6}}>
+                  {ev.type==="site"?<span style={{color:col(ev.siteId)}}>● site s{ev.siteId}</span>:<span>○ circle</span>}
+                  {" "}x={ev.x}
+                </div>
+              ))}
+              {panelData.queue.length>20&&<div style={{color:theme.textDimmer}}>...+{panelData.queue.length-20} more</div>}
+            </div>
+          )}
+        </PanelSection>
+
+        <PanelSection title="DCEL" theme={theme}
+          summary={panelData.dcel?`${panelData.dcel.vertexCount}V · ${panelData.dcel.edgeCount}E · ${panelData.dcel.faceCount}F`:"—"}
+          expanded={panelExpanded.dcel} onToggle={()=>setPanelExpanded(p=>({...p,dcel:!p.dcel}))}>
+          {panelData.dcel&&(
+            <>
+              {panelData.dcel.vertices.length>0&&(
+                <div style={{marginBottom:4}}>
+                  <div style={{color:theme.textMuted,marginBottom:2}}>Vertices:</div>
+                  {panelData.dcel.vertices.slice(0,20).map(v=>(
+                    <div key={v.id} style={{color:theme.textDim,lineHeight:1.6}}>v{v.id}: ({v.x}, {v.y})</div>
+                  ))}
+                  {panelData.dcel.vertices.length>20&&<div style={{color:theme.textDimmer}}>...+{panelData.dcel.vertices.length-20} more</div>}
+                </div>
+              )}
+              {panelData.dcel.edges.length>0&&(
+                <div>
+                  <div style={{color:theme.textMuted,marginBottom:2}}>Edges:</div>
+                  {panelData.dcel.edges.slice(0,15).map(e=>(
+                    <div key={e.id} style={{color:theme.textDim,lineHeight:1.6}}>
+                      e{e.id}: <span style={{color:col(e.leftId)}}>s{e.leftId}</span>|<span style={{color:col(e.rightId)}}>s{e.rightId}</span>
+                    </div>
+                  ))}
+                  {panelData.dcel.edges.length>15&&<div style={{color:theme.textDimmer}}>...+{panelData.dcel.edges.length-15} more</div>}
+                </div>
+              )}
+            </>
+          )}
+        </PanelSection>
+      </div>
+    </aside>
+  );
+}
+
 // ─── Component ──────────────────────────────────────────────────────────────
 export default function VoronoiVisualizer() {
   const [sites, setSites] = useState([]);
@@ -973,11 +1260,12 @@ export default function VoronoiVisualizer() {
   const [showCircles, setShowCircles] = useState(true);
   const [showEdges, setShowEdges] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
-  const [showPanel, setShowPanel] = useState(false);
+  const [showPanel, setShowPanel] = useState(true);
   const [panelExpanded, setPanelExpanded] = useState({ dcel:false, queue:false, beach:true });
   const [panelData, setPanelData] = useState({ dcel:null, queue:null, beach:null });
   const [hoveredBeachNodeId, setHoveredBeachNodeId] = useState(null);
   const [pinnedBeachNodeId, setPinnedBeachNodeId] = useState(null);
+  const [viewportWidth, setViewportWidth] = useState(() => typeof window === "undefined" ? 1440 : window.innerWidth);
   const theme = darkMode ? THEMES.dark : THEMES.light;
 
   const cvs = useRef(null);
@@ -989,11 +1277,18 @@ export default function VoronoiVisualizer() {
   const dragging = useRef(null); // { index, startX, startY, moved }
   const sweepDragging = useRef(false); // true when dragging the sweep line
   const [canvasCursor, setCanvasCursor] = useState("crosshair");
-  const activeBeachNodeId = hoveredBeachNodeId || pinnedBeachNodeId;
+  const activeBeachNodeId = pinnedBeachNodeId || hoveredBeachNodeId;
+  const isDockedSidebar = showPanel && viewportWidth >= 1220;
+  const isDrawerSidebar = showPanel && !isDockedSidebar;
 
   const W=860, H=520;
 
   useEffect(() => { document.body.style.background = theme.pageBg; }, [theme]);
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const syncHud = useCallback((algo, sweepX) => {
     const next = makeHudState(algo, sweepX);
@@ -1061,6 +1356,16 @@ export default function VoronoiVisualizer() {
       setPinnedBeachNodeId(null);
     }
   }, [showPanel]);
+
+  const handleHoverBeachNode = useCallback(nodeId => {
+    if (pinnedBeachNodeId) return;
+    setHoveredBeachNodeId(nodeId);
+  }, [pinnedBeachNodeId]);
+
+  const handleTogglePinnedBeachNode = useCallback(nodeId => {
+    setPinnedBeachNodeId(current => current === nodeId ? null : nodeId);
+    setHoveredBeachNodeId(null);
+  }, []);
 
   function pxPerSec(s) {
     if (s <= 50) return 10 + (s/50)*140;
@@ -1292,198 +1597,167 @@ export default function VoronoiVisualizer() {
     border:"1px solid "+(acc?theme.btnAccBorder:theme.btnBorder),borderRadius:7,padding:"6px 13px",cursor:"pointer",
     fontSize:13,fontFamily:"'DM Sans',sans-serif",fontWeight:acc?700:500,transition:"all 0.15s",
   });
+  const sidebarButtonLabel = showPanel ? "Hide Sidebar" : "Open Sidebar";
 
   return(
-    <div style={{minHeight:"100vh",background:theme.pageBg,color:theme.text,fontFamily:"'DM Sans',sans-serif",display:"flex",flexDirection:"column",alignItems:"center",padding:"20px 16px"}}>
+    <div style={{minHeight:"100vh",background:theme.pageBg,color:theme.text,fontFamily:"'DM Sans',sans-serif",display:"flex",flexDirection:"column",alignItems:"center",padding:"20px 16px",position:"relative"}}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
-
-      <div style={{textAlign:"center",marginBottom:14,maxWidth:860,display:"flex",alignItems:"center",justifyContent:"center",gap:12}}>
-        <div>
-        <h1 style={{fontSize:26,fontWeight:700,letterSpacing:"-0.5px",color:theme.heading,margin:"0 0 2px"}}>
-          <span style={{color:theme.accent}}>◆</span> Voronoi Diagram
-          <span style={{color:theme.textDimmer,fontWeight:400,fontSize:16,marginLeft:8}}>Fortune's Sweep Line</span>
-        </h1>
-        <p style={{color:theme.textDim,fontSize:12,margin:0,fontFamily:"'JetBrains Mono',monospace"}}>
-          {mode==="place"?"Left-click to add sites · Right-click to remove · Press ▶ Play":
-           mode==="animate"?`Sweep at x = ${hud.sweepX} · ${hud.stepCount||0} events processed`:
-           "✓ Complete — drag sweep line or press ← to rewind"}
-        </p>
-        </div>
-        <button onClick={()=>setDarkMode(d=>!d)} title={darkMode?"Switch to light mode":"Switch to dark mode"}
-          style={{background:"none",border:`1px solid ${theme.btnBorder}`,borderRadius:8,padding:"5px 9px",cursor:"pointer",fontSize:16,color:theme.textMuted,lineHeight:1}}>
-          {darkMode?"☀️":"🌙"}
-        </button>
-      </div>
-
-      <div style={{display:"flex",gap:10,alignItems:"flex-start",justifyContent:"center",flexWrap:"wrap",width:"100%",maxWidth:1210}}>
-        <div style={{position:"relative",borderRadius:12,overflow:"hidden",border:`1px solid ${theme.panelBorder}`,boxShadow:theme.shadow,flexShrink:0}}>
-          <canvas ref={cvs} width={W*dpr} height={H*dpr} onClick={onClick} onContextMenu={onCtx}
-            onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
-            style={{width:"min(860px,calc(100vw - 32px))",height:"auto",cursor:mode==="place"?(dragging.current?"grabbing":"crosshair"):canvasCursor,display:"block"}}/>
-
-          {mode==="animate"&&hud.lastEventType!=null&&(
-            <div style={{position:"absolute",top:10,left:10,
-              background:hud.lastEventType===SITE?theme.eventSiteBg:theme.eventCircleBg,
-              border:`1px solid ${hud.lastEventType===SITE?theme.eventSiteBorder:theme.eventCircleBorder}`,
-              borderRadius:8,padding:"6px 12px",fontFamily:"'JetBrains Mono',monospace",fontSize:11,
-              color:hud.lastEventType===SITE?theme.eventSiteText:theme.eventCircleText,backdropFilter:"blur(8px)"}}>
-              {hud.lastEventType===SITE?"● Site Event":"○ Circle Event"}
-              <span style={{color:theme.textDim,marginLeft:8}}>#{hud.stepCount}</span>
+      <div style={{width:"100%",maxWidth:isDockedSidebar?1280:980,display:"grid",gridTemplateColumns:isDockedSidebar?"minmax(0, 1fr) 380px":"1fr",gap:22,alignItems:"start"}}>
+        <div style={{minWidth:0,display:"flex",flexDirection:"column",alignItems:"center"}}>
+          <div style={{textAlign:"center",marginBottom:14,maxWidth:860,display:"flex",alignItems:"center",justifyContent:"center",gap:12}}>
+            <div>
+            <h1 style={{fontSize:26,fontWeight:700,letterSpacing:"-0.5px",color:theme.heading,margin:"0 0 2px"}}>
+              <span style={{color:theme.accent}}>◆</span> Voronoi Diagram
+              <span style={{color:theme.textDimmer,fontWeight:400,fontSize:16,marginLeft:8}}>Fortune's Sweep Line</span>
+            </h1>
+            <p style={{color:theme.textDim,fontSize:12,margin:0,fontFamily:"'JetBrains Mono',monospace"}}>
+              {mode==="place"?"Left-click to add sites · Right-click to remove · Press ▶ Play":
+               mode==="animate"?`Sweep at x = ${hud.sweepX} · ${hud.stepCount||0} events processed`:
+               "✓ Complete — drag sweep line or press ← to rewind"}
+            </p>
             </div>
-          )}
-        </div>
+            <button onClick={()=>setDarkMode(d=>!d)} title={darkMode?"Switch to light mode":"Switch to dark mode"}
+              style={{background:"none",border:`1px solid ${theme.btnBorder}`,borderRadius:8,padding:"5px 9px",cursor:"pointer",fontSize:16,color:theme.textMuted,lineHeight:1}}>
+              {darkMode?"☀️":"🌙"}
+            </button>
+          </div>
 
-        {showPanel&&(
-          <div style={{width:"min(360px,calc(100vw - 32px))",maxHeight:520,overflowY:"auto",background:theme.panelBg,border:`1px solid ${theme.panelBorder}`,
-            borderRadius:12,padding:"10px 12px",fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:theme.text,
-            display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontFamily:"'DM Sans',sans-serif",fontWeight:700,fontSize:14,color:theme.heading,marginBottom:2}}>
-              Data Structures
-            </div>
+          <div style={{width:"100%",maxWidth:860,position:"relative",borderRadius:18,overflow:"hidden",border:`1px solid ${theme.panelBorder}`,boxShadow:theme.shadow,flexShrink:0}}>
+            <canvas ref={cvs} width={W*dpr} height={H*dpr} onClick={onClick} onContextMenu={onCtx}
+              onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
+              style={{width:"min(860px,calc(100vw - 32px))",height:"auto",cursor:mode==="place"?(dragging.current?"grabbing":"crosshair"):canvasCursor,display:"block"}}/>
 
-            {/* DCEL Section */}
-            <PanelSection title="DCEL" theme={theme}
-              summary={panelData.dcel?`${panelData.dcel.vertexCount}V · ${panelData.dcel.edgeCount}E · ${panelData.dcel.faceCount}F`:"—"}
-              expanded={panelExpanded.dcel} onToggle={()=>setPanelExpanded(p=>({...p,dcel:!p.dcel}))}>
-              {panelData.dcel&&(
+            {mode==="animate"&&hud.lastEventType!=null&&(
+              <div style={{position:"absolute",top:10,left:10,
+                background:hud.lastEventType===SITE?theme.eventSiteBg:theme.eventCircleBg,
+                border:`1px solid ${hud.lastEventType===SITE?theme.eventSiteBorder:theme.eventCircleBorder}`,
+                borderRadius:8,padding:"6px 12px",fontFamily:"'JetBrains Mono',monospace",fontSize:11,
+                color:hud.lastEventType===SITE?theme.eventSiteText:theme.eventCircleText,backdropFilter:"blur(8px)"}}>
+                {hud.lastEventType===SITE?"● Site Event":"○ Circle Event"}
+                <span style={{color:theme.textDim,marginLeft:8}}>#{hud.stepCount}</span>
+              </div>
+            )}
+          </div>
+
+          <div style={{marginTop:14,display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center",alignItems:"center",maxWidth:860}}>
+            <div style={pS}>
+              {mode==="place"?(
+                <button onClick={startPlay} disabled={sites.length<2} style={{...bS(sites.length>=2),opacity:sites.length<2?0.4:1}}>▶ Play</button>
+              ):(
                 <>
-                  {panelData.dcel.vertices.length>0&&(
-                    <div style={{marginBottom:4}}>
-                      <div style={{color:theme.textMuted,marginBottom:2}}>Vertices:</div>
-                      {panelData.dcel.vertices.slice(0,20).map(v=>(
-                        <div key={v.id} style={{color:theme.textDim,lineHeight:1.6}}>v{v.id}: ({v.x}, {v.y})</div>
-                      ))}
-                      {panelData.dcel.vertices.length>20&&<div style={{color:theme.textDimmer}}>...+{panelData.dcel.vertices.length-20} more</div>}
-                    </div>
-                  )}
-                  {panelData.dcel.edges.length>0&&(
-                    <div>
-                      <div style={{color:theme.textMuted,marginBottom:2}}>Edges:</div>
-                      {panelData.dcel.edges.slice(0,15).map(e=>(
-                        <div key={e.id} style={{color:theme.textDim,lineHeight:1.6}}>
-                          e{e.id}: <span style={{color:col(e.leftId)}}>s{e.leftId}</span>|<span style={{color:col(e.rightId)}}>s{e.rightId}</span>
-                        </div>
-                      ))}
-                      {panelData.dcel.edges.length>15&&<div style={{color:theme.textDimmer}}>...+{panelData.dcel.edges.length-15} more</div>}
-                    </div>
-                  )}
+                  <button onClick={()=>{setPlaying(p=>!p);prevTimestamp.current=0;}} disabled={mode==="done"}
+                    style={{...bS(!playing),opacity:mode==="done"?0.4:1}}>
+                    {playing?"⏸ Pause":"▶ Resume"}</button>
+                  <button onClick={()=>stepPx(-1)} disabled={playing}
+                    style={{...bS(false),opacity:playing?0.4:1}}>
+                    ← 1px</button>
+                  <button onClick={()=>stepPx(1)} disabled={playing||mode==="done"}
+                    style={{...bS(false),opacity:(playing||mode==="done")?0.4:1}}>
+                    1px →</button>
+                  <button onClick={stepToNext} disabled={playing||mode==="done"}
+                    style={{...bS(false),opacity:(playing||mode==="done")?0.4:1}}>
+                    Next event →</button>
                 </>
               )}
-            </PanelSection>
+              <button onClick={reset} style={bS(false)}>↺ Reset</button>
+            </div>
 
-            {/* Priority Queue Section */}
-            <PanelSection title="Priority Queue" theme={theme}
-              summary={panelData.queue?`${panelData.queue.length} events`:"—"}
-              expanded={panelExpanded.queue} onToggle={()=>setPanelExpanded(p=>({...p,queue:!p.queue}))}>
-              {panelData.queue&&panelData.queue.length>0&&(
-                <div>
-                  {panelData.queue.slice(0,20).map((ev,i)=>(
-                    <div key={i} style={{color:theme.textDim,lineHeight:1.6}}>
-                      {ev.type==="site"?<span style={{color:col(ev.siteId)}}>● site s{ev.siteId}</span>:<span>○ circle</span>}
-                      {" "}x={ev.x}
-                    </div>
-                  ))}
-                  {panelData.queue.length>20&&<div style={{color:theme.textDimmer}}>...+{panelData.queue.length-20} more</div>}
-                </div>
-              )}
-            </PanelSection>
+            <div style={{...pS,padding:"6px 14px",gap:8}}>
+              <span style={{fontSize:11,color:theme.textDim,fontFamily:"'JetBrains Mono',monospace",minWidth:32}}>{speedLabel}</span>
+              <input type="range" min={1} max={100} value={speed} onChange={e=>setSpeed(+e.target.value)}
+                style={{width:100,accentColor:theme.accent,cursor:"pointer"}}/>
+              <span style={{fontSize:10,color:theme.textDimmer,fontFamily:"'JetBrains Mono',monospace"}}>{Math.round(pxPerSec(speed))}px/s</span>
+            </div>
 
-            {/* Beachline Tree Section */}
-            <PanelSection title="Beachline Tree" theme={theme}
-              summary={panelData.beach?.tree?`${panelData.beach.arcs.length} arcs · ${panelData.beach.breakpoints.length} breaks`:"—"}
-              expanded={panelExpanded.beach} onToggle={()=>setPanelExpanded(p=>({...p,beach:!p.beach}))}>
-              <BeachlineTreeView
-                debug={panelData.beach}
-                theme={theme}
-                activeNodeId={activeBeachNodeId}
-                pinnedNodeId={pinnedBeachNodeId}
-                onHoverNode={setHoveredBeachNodeId}
-                onLeaveTree={() => setHoveredBeachNodeId(null)}
-                onToggleNode={nodeId => setPinnedBeachNodeId(current => current === nodeId ? null : nodeId)}
-              />
-            </PanelSection>
+            {mode==="place"&&(
+              <div style={pS}>
+                <button onClick={()=>addR(5)} style={bS(false)}>+5</button>
+                <button onClick={()=>addR(15)} style={bS(false)}>+15</button>
+                <button onClick={()=>addR(30)} style={bS(false)}>+30</button>
+                <button onClick={clear} style={bS(false,true)}>Clear</button>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      <div style={{marginTop:14,display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center",alignItems:"center",maxWidth:860}}>
-        <div style={pS}>
-          {mode==="place"?(
-            <button onClick={startPlay} disabled={sites.length<2} style={{...bS(sites.length>=2),opacity:sites.length<2?0.4:1}}>▶ Play</button>
-          ):(
-            <>
-              <button onClick={()=>{setPlaying(p=>!p);prevTimestamp.current=0;}} disabled={mode==="done"}
-                style={{...bS(!playing),opacity:mode==="done"?0.4:1}}>
-                {playing?"⏸ Pause":"▶ Resume"}</button>
-              <button onClick={()=>stepPx(-1)} disabled={playing}
-                style={{...bS(false),opacity:playing?0.4:1}}>
-                ← 1px</button>
-              <button onClick={()=>stepPx(1)} disabled={playing||mode==="done"}
-                style={{...bS(false),opacity:(playing||mode==="done")?0.4:1}}>
-                1px →</button>
-              <button onClick={stepToNext} disabled={playing||mode==="done"}
-                style={{...bS(false),opacity:(playing||mode==="done")?0.4:1}}>
-                Next event →</button>
-            </>
-          )}
-          <button onClick={reset} style={bS(false)}>↺ Reset</button>
-        </div>
-
-        <div style={{...pS,padding:"6px 14px",gap:8}}>
-          <span style={{fontSize:11,color:theme.textDim,fontFamily:"'JetBrains Mono',monospace",minWidth:32}}>{speedLabel}</span>
-          <input type="range" min={1} max={100} value={speed} onChange={e=>setSpeed(+e.target.value)}
-            style={{width:100,accentColor:theme.accent,cursor:"pointer"}}/>
-          <span style={{fontSize:10,color:theme.textDimmer,fontFamily:"'JetBrains Mono',monospace"}}>{Math.round(pxPerSec(speed))}px/s</span>
-        </div>
-
-        {mode==="place"&&(
-          <div style={pS}>
-            <button onClick={()=>addR(5)} style={bS(false)}>+5</button>
-            <button onClick={()=>addR(15)} style={bS(false)}>+15</button>
-            <button onClick={()=>addR(30)} style={bS(false)}>+30</button>
-            <button onClick={clear} style={bS(false,true)}>Clear</button>
+          <div style={{marginTop:10,display:"flex",gap:14,flexWrap:"wrap",justifyContent:"center",alignItems:"center"}}>
+            {[["Sweep Line",showSweep,setShowSweep,theme.toggleSweep],
+              ["Beachline",showBeach,setShowBeach,theme.toggleBeach],
+              ["Circle Events",showCircles,setShowCircles,theme.toggleCircle],
+              ["Edges",showEdges,setShowEdges,theme.toggleEdge]].map(([l,v,s,c])=>(
+              <button key={l} onClick={()=>s(x=>!x)} style={{
+                background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",gap:6,
+                color:v?c:theme.textDimmer,fontSize:12,fontFamily:"'JetBrains Mono',monospace",padding:"3px 6px"}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:v?c:theme.panelBorder,
+                  border:`1.5px solid ${v?c:theme.textDimmer}`,transition:"all 0.15s"}}/>
+                {l}
+              </button>
+            ))}
+            <span style={{color:theme.panelBorder}}>│</span>
+            <button onClick={()=>setShowPanel(p=>!p)} style={{
+              background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",gap:6,
+              color:showPanel?theme.accent:theme.textDimmer,fontSize:12,fontFamily:"'JetBrains Mono',monospace",padding:"3px 6px"}}>
+              <span style={{width:8,height:8,borderRadius:2,background:showPanel?theme.accent:theme.panelBorder,
+                border:`1.5px solid ${showPanel?theme.accent:theme.textDimmer}`,transition:"all 0.15s"}}/>
+              {sidebarButtonLabel}
+            </button>
           </div>
-        )}
-      </div>
 
-      <div style={{marginTop:10,display:"flex",gap:14,flexWrap:"wrap",justifyContent:"center",alignItems:"center"}}>
-        {[["Sweep Line",showSweep,setShowSweep,theme.toggleSweep],
-          ["Beachline",showBeach,setShowBeach,theme.toggleBeach],
-          ["Circle Events",showCircles,setShowCircles,theme.toggleCircle],
-          ["Edges",showEdges,setShowEdges,theme.toggleEdge]].map(([l,v,s,c])=>(
-          <button key={l} onClick={()=>s(x=>!x)} style={{
-            background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",gap:6,
-            color:v?c:theme.textDimmer,fontSize:12,fontFamily:"'JetBrains Mono',monospace",padding:"3px 6px"}}>
-            <span style={{width:8,height:8,borderRadius:"50%",background:v?c:theme.panelBorder,
-              border:`1.5px solid ${v?c:theme.textDimmer}`,transition:"all 0.15s"}}/>
-            {l}
-          </button>
-        ))}
-        <span style={{color:theme.panelBorder}}>│</span>
-        <button onClick={()=>setShowPanel(p=>!p)} style={{
-          background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",gap:6,
-          color:showPanel?theme.accent:theme.textDimmer,fontSize:12,fontFamily:"'JetBrains Mono',monospace",padding:"3px 6px"}}>
-          <span style={{width:8,height:8,borderRadius:2,background:showPanel?theme.accent:theme.panelBorder,
-            border:`1.5px solid ${showPanel?theme.accent:theme.textDimmer}`,transition:"all 0.15s"}}/>
-          Data Panel
-        </button>
-      </div>
-
-      <div style={{marginTop:16,maxWidth:860,width:"100%",display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:10,
-        fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>
-        {[
-          ["Algorithm",[["Type","Fortune's sweep"],["Direction","Left → Right"],["Complexity","O(n log n)"],["Beachline","Parabolic arcs"]]],
-          ["Current State",[["Sites",`${sites.length}`],["Events processed",`${hud.stepCount??"—"}`],["Events queued",`${hud.queueLength??"—"}`],["Vertices found",`${hud.vertices??"—"}`]]],
-          ["Legend",[["┃ blue","Sweep line (continuous)"],["~ colored","Beachline parabolas"],["◯ gray","Circle events → vertices"],["━ white","Voronoi cell edges"]]],
-        ].map(([title,rows])=>(
-          <div key={title} style={{background:theme.panelBg,borderRadius:10,padding:"12px 16px",border:`1px solid ${theme.panelBorder}`}}>
-            <div style={{color:theme.textMuted,fontWeight:500,marginBottom:6,fontFamily:"'DM Sans',sans-serif",fontSize:13}}>{title}</div>
-            {rows.map(([k,v])=>(
-              <div key={k} style={{color:theme.textDim,lineHeight:1.8}}>{k}: <span style={{color:theme.text}}>{v}</span></div>
+          <div style={{marginTop:16,maxWidth:860,width:"100%",display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:10,
+            fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>
+            {[
+              ["Algorithm",[["Type","Fortune's sweep"],["Direction","Left → Right"],["Complexity","O(n log n)"],["Beachline","Parabolic arcs"]]],
+              ["Current State",[["Sites",`${sites.length}`],["Events processed",`${hud.stepCount??"—"}`],["Events queued",`${hud.queueLength??"—"}`],["Vertices found",`${hud.vertices??"—"}`]]],
+              ["Legend",[["┃ blue","Sweep line (continuous)"],["~ colored","Beachline parabolas"],["◯ gray","Circle events → vertices"],["━ white","Voronoi cell edges"]]],
+            ].map(([title,rows])=>(
+              <div key={title} style={{background:theme.panelBg,borderRadius:10,padding:"12px 16px",border:`1px solid ${theme.panelBorder}`}}>
+                <div style={{color:theme.textMuted,fontWeight:500,marginBottom:6,fontFamily:"'DM Sans',sans-serif",fontSize:13}}>{title}</div>
+                {rows.map(([k,v])=>(
+                  <div key={k} style={{color:theme.textDim,lineHeight:1.8}}>{k}: <span style={{color:theme.text}}>{v}</span></div>
+                ))}
+              </div>
             ))}
           </div>
-        ))}
+        </div>
+
+        {isDockedSidebar&&(
+          <StructuresSidebar
+            docked
+            theme={theme}
+            panelData={panelData}
+            panelExpanded={panelExpanded}
+            setPanelExpanded={setPanelExpanded}
+            activeBeachNodeId={activeBeachNodeId}
+            pinnedBeachNodeId={pinnedBeachNodeId}
+            onHoverBeachNode={handleHoverBeachNode}
+            onTogglePinnedBeachNode={handleTogglePinnedBeachNode}
+            onClose={() => setShowPanel(false)}
+          />
+        )}
       </div>
+
+      {isDrawerSidebar&&(
+        <div style={{position:"fixed",inset:0,zIndex:50,display:"flex",justifyContent:"flex-end"}}>
+          <button
+            aria-label="Close sidebar backdrop"
+            onClick={() => setShowPanel(false)}
+            style={{flex:1,border:"none",background:"rgba(2,6,23,0.45)",backdropFilter:"blur(6px)",cursor:"pointer"}}
+          />
+          <div style={{padding:12}}>
+            <StructuresSidebar
+              docked={false}
+              theme={theme}
+              panelData={panelData}
+              panelExpanded={panelExpanded}
+              setPanelExpanded={setPanelExpanded}
+              activeBeachNodeId={activeBeachNodeId}
+              pinnedBeachNodeId={pinnedBeachNodeId}
+              onHoverBeachNode={handleHoverBeachNode}
+              onTogglePinnedBeachNode={handleTogglePinnedBeachNode}
+              onClose={() => setShowPanel(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

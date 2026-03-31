@@ -6,3 +6,8 @@ Original prompt: Review and audit the code.
 - 2026-03-11: Verification: `npm run build` passes; browser check shows the HUD advancing from `Sweep at x = 84 · 0 events processed` to `Sweep at x = 272 · 1 events processed` after 2 seconds; console error check is clean; local algorithm checks confirm offscreen completion drains the queue and reversed site order now produces identical final edges.
 - 2026-03-31: Added a derived beachline tree view to the data panel. The tree is built from the live arc order using a right-spine breakpoint construction, renders as an SVG, and supports hover/click linking back to the canvas.
 - 2026-03-31: Current verification target is the new linked highlight behavior: leaf nodes should thicken one arc and halo the related site, while internal nodes should accent the subtree span and mark its boundary breakpoints.
+- 2026-03-31: UI polish pass in progress. The data structure panel is being promoted into a real right-hand sidebar on desktop, with a slide-over drawer on tighter widths so it no longer drops under the canvas.
+- 2026-03-31: Tree navigation is now being tuned around an explicit viewport with smooth scrolling, drag-to-pan, and center controls instead of a raw overflowing SVG.
+- 2026-03-31: Tree derivation corrected to follow the lecture slide more closely. Breakpoint labels now store the lower arc's site first, and the teaching tree is built recursively over breakpoint indices instead of a hardcoded right spine.
+
+- 2026-03-31: Selection UX tightened so click acts as a lock, hover clears on node exit, and internal-node highlights now mark the represented breakpoint itself.
