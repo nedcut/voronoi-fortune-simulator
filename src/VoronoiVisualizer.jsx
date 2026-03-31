@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 
 /*
  * ═══════════════════════════════════════════════════════════════════════════
@@ -292,6 +292,10 @@ class FortuneAlgo {
     return arcs;
   }
 
+  getBeachlineDebug(renderX) {
+    return buildBeachlineTreeDebug(this.getArcsAt(renderX), renderX);
+  }
+
   getDCEL() {
     const verts = this.vertices.map((v,i) => ({ id:i, x:Math.round(v.x*10)/10, y:Math.round(v.y*10)/10 }));
     const eds = this.edges.filter(e=>e.end).map((e,i) => ({
@@ -452,8 +456,245 @@ function sameHudState(a, b) {
     a.lastEventType === b.lastEventType;
 }
 
+function buildBeachlineTreeDebug(arcs, sweepX) {
+  if (!arcs.length) {
+    return { arcs: [], breakpoints: [], tree: null, orderSummary: "" };
+  }
+
+  const arcItems = arcs.map((arc, index) => ({
+    id: `leaf-${index}-${arc.site.id}`,
+    kind: "leaf",
+    label: `s${arc.site.id}`,
+    spanStart: index,
+    spanEnd: index,
+    leafIndex: index,
+    siteId: arc.site.id,
+    siteX: arc.site.x,
+    siteY: arc.site.y,
+    yTop: arc.yTop,
+    yBot: arc.yBot,
+    site: arc.site,
+  }));
+
+  const breakpoints = [];
+  for (let i = 0; i < arcItems.length - 1; i++) {
+    const upperSite = arcItems[i].site;
+    const lowerSite = arcItems[i + 1].site;
+    const y = breakpointY(upperSite, lowerSite, sweepX);
+    const x = parabolaX(upperSite, sweepX, y);
+    breakpoints.push({
+      id: `break-${i}`,
+      index: i,
+      x,
+      y,
+      upperSiteId: upperSite.id,
+      lowerSiteId: lowerSite.id,
+      label: `(s${upperSite.id},s${lowerSite.id})`,
+    });
+  }
+
+  const nodesById = {};
+  for (const leaf of arcItems) {
+    nodesById[leaf.id] = {
+      ...leaf,
+      depth: 0,
+      siteIds: [leaf.siteId],
+      leftId: null,
+      rightId: null,
+      boundaryBreakpointIndices: [leaf.leafIndex - 1, leaf.leafIndex].filter(
+        index => index >= 0 && index < breakpoints.length
+      ),
+    };
+  }
+
+  let rootId = arcItems[arcItems.length - 1].id;
+  for (let i = arcItems.length - 2; i >= 0; i--) {
+    const leftId = arcItems[i].id;
+    const rightId = rootId;
+    const leftNode = nodesById[leftId];
+    const rightNode = nodesById[rightId];
+    const spanStart = leftNode.spanStart;
+    const spanEnd = rightNode.spanEnd;
+    const splitIndex = leftNode.spanEnd;
+    const leftSiteId = arcItems[leftNode.spanEnd].siteId;
+    const rightSiteId = arcItems[rightNode.spanStart].siteId;
+    const nodeId = `node-${spanStart}-${spanEnd}-${leftSiteId}-${rightSiteId}`;
+    nodesById[nodeId] = {
+      id: nodeId,
+      kind: "internal",
+      label: `(s${leftSiteId},s${rightSiteId})`,
+      spanStart,
+      spanEnd,
+      splitIndex,
+      leftId,
+      rightId,
+      depth: 0,
+      siteIds: [...new Set(arcItems.slice(spanStart, spanEnd + 1).map(arc => arc.siteId))],
+      boundaryBreakpointIndices: [spanStart - 1, spanEnd].filter(
+        index => index >= 0 && index < breakpoints.length
+      ),
+    };
+    rootId = nodeId;
+  }
+
+  let maxDepth = 0;
+  const assignDepth = (nodeId, depth) => {
+    const node = nodesById[nodeId];
+    if (!node) return;
+    node.depth = depth;
+    if (depth > maxDepth) maxDepth = depth;
+    if (node.leftId) assignDepth(node.leftId, depth + 1);
+    if (node.rightId) assignDepth(node.rightId, depth + 1);
+  };
+  assignDepth(rootId, 0);
+
+  return {
+    arcs: arcItems,
+    breakpoints,
+    orderSummary: arcItems.map(arc => arc.label).join(" -> "),
+    tree: {
+      rootId,
+      maxDepth,
+      nodes: Object.values(nodesById),
+      nodesById,
+    },
+  };
+}
+
+function getTreeNodeBox(node) {
+  const charWidth = node.kind === "leaf" ? 7.2 : 6.5;
+  const horizontalPadding = node.kind === "leaf" ? 22 : 18;
+  const width = Math.max(node.kind === "leaf" ? 42 : 58, horizontalPadding + node.label.length * charWidth);
+  return { width, height: node.kind === "leaf" ? 26 : 28 };
+}
+
+function layoutBeachlineTree(tree) {
+  if (!tree?.rootId) return null;
+
+  const leafGap = 84;
+  const rowGap = 66;
+  const padX = 28;
+  const padY = 22;
+  const positions = {};
+  const leaves = tree.nodes
+    .filter(node => node.kind === "leaf")
+    .sort((a, b) => a.leafIndex - b.leafIndex);
+
+  leaves.forEach((leaf, index) => {
+    positions[leaf.id] = {
+      x: padX + index * leafGap,
+      y: padY + leaf.depth * rowGap,
+    };
+  });
+
+  const placeInternal = nodeId => {
+    if (positions[nodeId]) return positions[nodeId];
+    const node = tree.nodesById[nodeId];
+    const left = placeInternal(node.leftId);
+    const right = placeInternal(node.rightId);
+    positions[nodeId] = {
+      x: (left.x + right.x) / 2,
+      y: padY + node.depth * rowGap,
+    };
+    return positions[nodeId];
+  };
+  placeInternal(tree.rootId);
+
+  const renderedNodes = tree.nodes.map(node => {
+    const box = getTreeNodeBox(node);
+    return {
+      ...node,
+      ...positions[node.id],
+      boxWidth: box.width,
+      boxHeight: box.height,
+    };
+  });
+
+  const width = Math.max(220, padX * 2 + Math.max(0, leaves.length - 1) * leafGap);
+  const height = padY * 2 + tree.maxDepth * rowGap + 40;
+
+  const nodesById = {};
+  for (const node of renderedNodes) nodesById[node.id] = node;
+
+  return { width, height, nodes: renderedNodes, nodesById };
+}
+
+function drawArcStroke(ctx, arc, sweepX, W, H, strokeStyle, lineWidth, alpha = 1) {
+  const y0 = Math.max(0, arc.yTop);
+  const y1 = Math.min(H, arc.yBot);
+  if (y1 <= y0) return;
+
+  ctx.save();
+  ctx.strokeStyle = strokeStyle;
+  ctx.lineWidth = lineWidth;
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  const N = 80;
+  const dy = (y1 - y0) / N;
+  let started = false;
+  for (let i = 0; i <= N; i++) {
+    const y = y0 + i * dy;
+    const x = parabolaX(arc.site, sweepX, y);
+    if (!isFinite(x) || x < -100 || x > W + 100) continue;
+    const cx = Math.max(-10, Math.min(W + 10, x));
+    if (!started) {
+      ctx.moveTo(cx, y);
+      started = true;
+    } else {
+      ctx.lineTo(cx, y);
+    }
+  }
+  if (started) ctx.stroke();
+  ctx.restore();
+}
+
+function drawBeachlineHighlight(ctx, debug, activeNodeId, sweepX, theme, W, H) {
+  if (!debug?.tree || !activeNodeId) return;
+  const node = debug.tree.nodesById[activeNodeId];
+  if (!node) return;
+
+  const highlightArcs = debug.arcs.slice(node.spanStart, node.spanEnd + 1);
+  for (const arc of highlightArcs) {
+    drawArcStroke(ctx, arc, sweepX, W, H, theme.accent, node.kind === "leaf" ? 5.5 : 4.5, node.kind === "leaf" ? 0.95 : 0.75);
+  }
+
+  if (node.kind === "leaf") {
+    ctx.save();
+    ctx.strokeStyle = theme.accent;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.arc(node.siteX, node.siteY, 12, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = theme.accent;
+    ctx.globalAlpha = 0.18;
+    ctx.beginPath();
+    ctx.arc(node.siteX, node.siteY, 18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  const boundaryBreakpoints = node.boundaryBreakpointIndices
+    .map(index => debug.breakpoints[index])
+    .filter(point => point && isFinite(point.x) && isFinite(point.y));
+  if (!boundaryBreakpoints.length) return;
+
+  ctx.save();
+  ctx.fillStyle = theme.accent;
+  ctx.strokeStyle = theme.bg;
+  ctx.lineWidth = 2;
+  for (const point of boundaryBreakpoints) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // ─── Canvas draw ────────────────────────────────────────────────────────────
-function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme) {
+function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme, activeBeachNodeId = null) {
   const dpr = window.devicePixelRatio||1;
   ctx.save(); ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
@@ -478,6 +719,9 @@ function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme)
   }
 
   const sx = displaySweepX;
+  const beachlineDebug = algo && (mode === "animate" || mode === "done")
+    ? algo.getBeachlineDebug(sx)
+    : null;
 
   if (algo && (mode === "animate" || mode === "done")) {
     // ── Completed edges ──
@@ -530,24 +774,14 @@ function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme)
 
     // ── Beachline (only during animation) ──
     if (opts.beach && mode === "animate") {
-      const arcs = algo.getArcsAt(sx);
+      const arcs = beachlineDebug?.arcs ?? algo.getArcsAt(sx);
       for (const arc of arcs) {
-        const f = arc.site;
-        const y0 = Math.max(0, arc.yTop), y1 = Math.min(H, arc.yBot);
-        if (y1 <= y0) continue;
-        ctx.strokeStyle = col(f.id); ctx.lineWidth = 2.5; ctx.globalAlpha = 0.8;
-        ctx.beginPath();
-        const N = 80, dy = (y1-y0)/N;
-        let started = false;
-        for (let i=0;i<=N;i++){
-          const y = y0+i*dy;
-          const x = parabolaX(f, sx, y);
-          if (!isFinite(x) || x < -100 || x > W + 100) continue;
-          const cx = Math.max(-10,Math.min(W+10,x));
-          if (!started) { ctx.moveTo(cx,y); started = true; } else ctx.lineTo(cx,y);
-        }
-        ctx.stroke(); ctx.globalAlpha = 1;
+        drawArcStroke(ctx, arc, sx, W, H, col(arc.site.id), 2.5, 0.8);
       }
+    }
+
+    if (opts.beach && activeBeachNodeId && beachlineDebug) {
+      drawBeachlineHighlight(ctx, beachlineDebug, activeBeachNodeId, sx, theme, W, H);
     }
 
     // ── Sweep line (during animation and done mode for scrubbing) ──
@@ -617,6 +851,101 @@ function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme)
   ctx.restore();
 }
 
+function BeachlineTreeView({
+  debug,
+  theme,
+  activeNodeId,
+  pinnedNodeId,
+  onHoverNode,
+  onLeaveTree,
+  onToggleNode,
+}) {
+  if (!debug?.tree) {
+    return (
+      <div style={{ color: theme.textDim, lineHeight: 1.6 }}>
+        Start the sweep to inspect the live breakpoint tree.
+      </div>
+    );
+  }
+
+  const layout = useMemo(() => layoutBeachlineTree(debug.tree), [debug.tree]);
+  if (!layout) return null;
+
+  return (
+    <div onMouseLeave={onLeaveTree}>
+      <div style={{ color: theme.textDim, lineHeight: 1.5, marginBottom: 8 }}>
+        Hover a node to preview its beachline span. Click to pin the highlight.
+      </div>
+      <div style={{ overflowX: "auto", paddingBottom: 4 }}>
+        <svg
+          width={layout.width}
+          height={layout.height}
+          viewBox={`0 0 ${layout.width} ${layout.height}`}
+          style={{ display: "block" }}
+        >
+          {layout.nodes
+            .filter(node => node.kind === "internal")
+            .map(node => {
+              const left = layout.nodesById[node.leftId];
+              const right = layout.nodesById[node.rightId];
+              if (!left || !right) return null;
+              return (
+                <g key={`${node.id}-links`} stroke={theme.panelBorder} strokeWidth="1.5" fill="none" opacity="0.9">
+                  <line x1={node.x} y1={node.y + node.boxHeight / 2} x2={left.x} y2={left.y - left.boxHeight / 2 + 1} />
+                  <line x1={node.x} y1={node.y + node.boxHeight / 2} x2={right.x} y2={right.y - right.boxHeight / 2 + 1} />
+                </g>
+              );
+            })}
+
+          {layout.nodes.map(node => {
+            const isActive = node.id === activeNodeId;
+            const isPinned = node.id === pinnedNodeId;
+            const isLeaf = node.kind === "leaf";
+            const fill = isLeaf ? col(node.siteId) : theme.btnBg;
+            const stroke = isActive || isPinned ? theme.accent : isLeaf ? fill : theme.btnBorder;
+            const textColor = isLeaf ? theme.siteDot : theme.text;
+            return (
+              <g
+                key={node.id}
+                transform={`translate(${node.x - node.boxWidth / 2} ${node.y - node.boxHeight / 2})`}
+                style={{ cursor: "pointer" }}
+                onMouseEnter={() => onHoverNode(node.id)}
+                onClick={() => onToggleNode(node.id)}
+              >
+                <rect
+                  width={node.boxWidth}
+                  height={node.boxHeight}
+                  rx={isLeaf ? 13 : 10}
+                  fill={fill}
+                  stroke={stroke}
+                  strokeWidth={isPinned ? 2.5 : isActive ? 2 : 1.2}
+                  opacity={isActive || isPinned ? 1 : isLeaf ? 0.92 : 1}
+                />
+                <text
+                  x={node.boxWidth / 2}
+                  y={node.boxHeight / 2 + 4}
+                  textAnchor="middle"
+                  fill={textColor}
+                  style={{
+                    fontFamily: "'JetBrains Mono',monospace",
+                    fontSize: isLeaf ? 11 : 10,
+                    fontWeight: isLeaf ? 600 : 500,
+                    userSelect: "none",
+                  }}
+                >
+                  {node.label}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+      <div style={{ color: theme.textMuted, marginTop: 6, marginBottom: 2 }}>Order:</div>
+      <div style={{ color: theme.textDim, lineHeight: 1.6 }}>{debug.orderSummary}</div>
+    </div>
+  );
+}
+
 function PanelSection({ title, summary, expanded, onToggle, theme, children }) {
   return (
     <div style={{borderTop:`1px solid ${theme.panelBorder}`,paddingTop:6}}>
@@ -645,8 +974,10 @@ export default function VoronoiVisualizer() {
   const [showEdges, setShowEdges] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
   const [showPanel, setShowPanel] = useState(false);
-  const [panelExpanded, setPanelExpanded] = useState({ dcel:false, queue:false, beach:false });
+  const [panelExpanded, setPanelExpanded] = useState({ dcel:false, queue:false, beach:true });
   const [panelData, setPanelData] = useState({ dcel:null, queue:null, beach:null });
+  const [hoveredBeachNodeId, setHoveredBeachNodeId] = useState(null);
+  const [pinnedBeachNodeId, setPinnedBeachNodeId] = useState(null);
   const theme = darkMode ? THEMES.dark : THEMES.light;
 
   const cvs = useRef(null);
@@ -658,6 +989,7 @@ export default function VoronoiVisualizer() {
   const dragging = useRef(null); // { index, startX, startY, moved }
   const sweepDragging = useRef(false); // true when dragging the sweep line
   const [canvasCursor, setCanvasCursor] = useState("crosshair");
+  const activeBeachNodeId = hoveredBeachNodeId || pinnedBeachNodeId;
 
   const W=860, H=520;
 
@@ -677,8 +1009,8 @@ export default function VoronoiVisualizer() {
     syncHud(algo, targetX);
     const c = cvs.current; if (!c) return;
     draw(c.getContext("2d"), W, H, sites, algo, targetX,
-      {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges}, prev.current, "animate", theme);
-  }, [sites, showSweep, showBeach, showCircles, showEdges, syncHud, theme]);
+      {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges}, prev.current, "animate", theme, activeBeachNodeId);
+  }, [sites, showSweep, showBeach, showCircles, showEdges, syncHud, theme, activeBeachNodeId]);
 
   // Scrub to any x position — goes forward if possible, rebuilds if backward
   const scrubTo = useCallback((targetX) => {
@@ -691,12 +1023,12 @@ export default function VoronoiVisualizer() {
       syncHud(algo, clamped);
       const c = cvs.current; if (!c) return;
       draw(c.getContext("2d"), W, H, sites, algo, clamped,
-        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges}, prev.current, "animate", theme);
+        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges}, prev.current, "animate", theme, activeBeachNodeId);
     } else {
       // Backward (or algo was done): must replay from scratch
       rebuildTo(clamped);
     }
-  }, [sites, showSweep, showBeach, showCircles, showEdges, syncHud, theme, rebuildTo]);
+  }, [sites, showSweep, showBeach, showCircles, showEdges, syncHud, theme, rebuildTo, activeBeachNodeId]);
 
   // Update panel data when HUD changes (event boundaries) and panel is visible
   useEffect(() => {
@@ -705,9 +1037,30 @@ export default function VoronoiVisualizer() {
     setPanelData({
       dcel: algo.getDCEL(),
       queue: algo.getQueueContents(),
-      beach: algo.getBeachlineList(),
+      beach: algo.getBeachlineDebug(sweepXRef.current),
     });
   }, [hud, showPanel]);
+
+  useEffect(() => {
+    if (!panelData.beach?.tree) {
+      if (hoveredBeachNodeId) setHoveredBeachNodeId(null);
+      if (pinnedBeachNodeId) setPinnedBeachNodeId(null);
+      return;
+    }
+    if (hoveredBeachNodeId && !panelData.beach.tree.nodesById[hoveredBeachNodeId]) {
+      setHoveredBeachNodeId(null);
+    }
+    if (pinnedBeachNodeId && !panelData.beach.tree.nodesById[pinnedBeachNodeId]) {
+      setPinnedBeachNodeId(null);
+    }
+  }, [panelData.beach, hoveredBeachNodeId, pinnedBeachNodeId]);
+
+  useEffect(() => {
+    if (!showPanel) {
+      setHoveredBeachNodeId(null);
+      setPinnedBeachNodeId(null);
+    }
+  }, [showPanel]);
 
   function pxPerSec(s) {
     if (s <= 50) return 10 + (s/50)*140;
@@ -724,9 +1077,9 @@ export default function VoronoiVisualizer() {
     if (mode==="place"||mode==="done") {
       const c=cvs.current; if(!c)return;
       draw(c.getContext("2d"),W,H,sites,alg.current,sweepXRef.current,
-        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme);
+        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,activeBeachNodeId);
     }
-  }, [sites,mode,showSweep,showBeach,showCircles,showEdges,theme]);
+  }, [sites,mode,showSweep,showBeach,showCircles,showEdges,theme,activeBeachNodeId]);
 
   // Continuous animation
   useEffect(() => {
@@ -750,26 +1103,26 @@ export default function VoronoiVisualizer() {
         setMode("done"); setPlaying(false);
         const c=cvs.current;
         if(c) draw(c.getContext("2d"),W,H,sites,algo,sweepXRef.current,
-          {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,"done",theme);
+          {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,"done",theme,activeBeachNodeId);
         return;
       }
       const c=cvs.current;
       if(c) draw(c.getContext("2d"),W,H,sites,algo,newX,
-        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme);
+        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,activeBeachNodeId);
       anim.current = requestAnimationFrame(loop);
     };
     anim.current = requestAnimationFrame(loop);
     return()=>{running=false;cancelAnimationFrame(anim.current);};
-  },[playing,mode,speed,sites,showSweep,showBeach,showCircles,showEdges,theme]);
+  },[playing,mode,speed,sites,showSweep,showBeach,showCircles,showEdges,theme,activeBeachNodeId]);
 
   // Paused redraw
   useEffect(() => {
     if (mode==="animate"&&!playing) {
       const c=cvs.current; if(!c)return;
       draw(c.getContext("2d"),W,H,sites,alg.current,sweepXRef.current,
-        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme);
+        {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,mode,theme,activeBeachNodeId);
     }
-  },[mode,playing,showSweep,showBeach,showCircles,showEdges,theme]);
+  },[mode,playing,showSweep,showBeach,showCircles,showEdges,theme,activeBeachNodeId]);
 
   const onClick=useCallback(e=>{
     // Suppress click after sweep line drag
@@ -792,7 +1145,7 @@ export default function VoronoiVisualizer() {
       const c=cvs.current; if(!c)return;
       draw(c.getContext("2d"),W,H,sites,algo,sweepXRef.current,
         {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,
-        algo.done?"done":"animate",theme);
+        algo.done?"done":"animate",theme,activeBeachNodeId);
       if(algo.done){setMode("done");setPlaying(false);}
       return;
     }
@@ -805,7 +1158,7 @@ export default function VoronoiVisualizer() {
     }
     if(x<5||x>W-5||y<5||y>H-5)return;
     setSites(p => appendSites(p, [{ x, y }]));
-  },[mode,sites,playing,showSweep,showBeach,showCircles,showEdges,syncHud,theme]);
+  },[mode,sites,playing,showSweep,showBeach,showCircles,showEdges,syncHud,theme,activeBeachNodeId]);
 
   const onCtx=useCallback(e=>{
     e.preventDefault(); if(mode!=="place")return;
@@ -886,9 +1239,9 @@ export default function VoronoiVisualizer() {
     const c=cvs.current; if(!c)return;
     draw(c.getContext("2d"),W,H,sites,algo,sweepXRef.current,
       {sweep:showSweep,beach:showBeach,circles:showCircles,edges:showEdges},prev.current,
-      algo.done?"done":"animate",theme);
+      algo.done?"done":"animate",theme,activeBeachNodeId);
     if(algo.done){setMode("done");setPlaying(false);}
-  },[sites,showSweep,showBeach,showCircles,showEdges,syncHud,theme]);
+  },[sites,showSweep,showBeach,showCircles,showEdges,syncHud,theme,activeBeachNodeId]);
 
   const stepPx=useCallback((delta)=>{
     if(!alg.current)return;
@@ -916,6 +1269,8 @@ export default function VoronoiVisualizer() {
   const reset=useCallback(()=>{
     setPlaying(false);cancelAnimationFrame(anim.current);
     alg.current=null;sweepXRef.current=0;prevTimestamp.current=0;
+    setHoveredBeachNodeId(null);
+    setPinnedBeachNodeId(null);
     syncHud(null, 0);
     setMode("place");
   },[syncHud]);
@@ -960,7 +1315,7 @@ export default function VoronoiVisualizer() {
         </button>
       </div>
 
-      <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+      <div style={{display:"flex",gap:10,alignItems:"flex-start",justifyContent:"center",flexWrap:"wrap",width:"100%",maxWidth:1210}}>
         <div style={{position:"relative",borderRadius:12,overflow:"hidden",border:`1px solid ${theme.panelBorder}`,boxShadow:theme.shadow,flexShrink:0}}>
           <canvas ref={cvs} width={W*dpr} height={H*dpr} onClick={onClick} onContextMenu={onCtx}
             onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
@@ -979,7 +1334,7 @@ export default function VoronoiVisualizer() {
         </div>
 
         {showPanel&&(
-          <div style={{width:280,maxHeight:520,overflowY:"auto",background:theme.panelBg,border:`1px solid ${theme.panelBorder}`,
+          <div style={{width:"min(360px,calc(100vw - 32px))",maxHeight:520,overflowY:"auto",background:theme.panelBg,border:`1px solid ${theme.panelBorder}`,
             borderRadius:12,padding:"10px 12px",fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:theme.text,
             display:"flex",flexDirection:"column",gap:8}}>
             <div style={{fontFamily:"'DM Sans',sans-serif",fontWeight:700,fontSize:14,color:theme.heading,marginBottom:2}}>
@@ -1033,21 +1388,19 @@ export default function VoronoiVisualizer() {
               )}
             </PanelSection>
 
-            {/* Beachline Section */}
-            <PanelSection title="Beachline" theme={theme}
-              summary={panelData.beach?`${panelData.beach.length} arcs`:"—"}
+            {/* Beachline Tree Section */}
+            <PanelSection title="Beachline Tree" theme={theme}
+              summary={panelData.beach?.tree?`${panelData.beach.arcs.length} arcs · ${panelData.beach.breakpoints.length} breaks`:"—"}
               expanded={panelExpanded.beach} onToggle={()=>setPanelExpanded(p=>({...p,beach:!p.beach}))}>
-              {panelData.beach&&panelData.beach.length>0&&(
-                <div>
-                  {panelData.beach.slice(0,30).map((arc,i)=>(
-                    <div key={i} style={{color:theme.textDim,lineHeight:1.6}}>
-                      <span style={{color:col(arc.siteId),fontWeight:500}}>s{arc.siteId}</span>
-                      {" "}({Math.round(arc.siteX)}, {Math.round(arc.siteY)})
-                    </div>
-                  ))}
-                  {panelData.beach.length>30&&<div style={{color:theme.textDimmer}}>...+{panelData.beach.length-30} more</div>}
-                </div>
-              )}
+              <BeachlineTreeView
+                debug={panelData.beach}
+                theme={theme}
+                activeNodeId={activeBeachNodeId}
+                pinnedNodeId={pinnedBeachNodeId}
+                onHoverNode={setHoveredBeachNodeId}
+                onLeaveTree={() => setHoveredBeachNodeId(null)}
+                onToggleNode={nodeId => setPinnedBeachNodeId(current => current === nodeId ? null : nodeId)}
+              />
             </PanelSection>
           </div>
         )}
@@ -1116,7 +1469,7 @@ export default function VoronoiVisualizer() {
         </button>
       </div>
 
-      <div style={{marginTop:16,maxWidth:860,width:"100%",display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,
+      <div style={{marginTop:16,maxWidth:860,width:"100%",display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:10,
         fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>
         {[
           ["Algorithm",[["Type","Fortune's sweep"],["Direction","Left → Right"],["Complexity","O(n log n)"],["Beachline","Parabolic arcs"]]],
