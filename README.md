@@ -24,8 +24,8 @@ An interactive, educational visualization of **Fortune's algorithm** for computi
 ## Quick Start
 
 ```bash
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
 Open [http://localhost:5173](http://localhost:5173).
@@ -55,8 +55,8 @@ The visualization renders all of this in real time using HTML Canvas, with the b
 ## Build
 
 ```bash
-npm run build    # Output in dist/
-npm run preview  # Preview production build
+bun run build    # Output in dist/
+bun run preview  # Preview production build
 ```
 
 ## License

@@ -3,6 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "packageManager": "bun@1.2.18",
   "description": "Interactive Fortune's Algorithm visualizer for Voronoi diagrams — built as an educational tool for computational geometry",
   "scripts": {
     "dev": "vite",
