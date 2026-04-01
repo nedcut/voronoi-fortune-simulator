@@ -1571,10 +1571,7 @@ function BeachlineTreeView({
   if (!debug?.tree) {
     return (
       <div>
-        <div style={{ color: theme.textDim, lineHeight: 1.5, marginBottom: 10 }}>
-          Start the sweep to inspect the live breakpoint tree.
-        </div>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:8}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"flex-start",gap:8,marginBottom:10,flexWrap:"wrap"}}>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
             <button disabled style={{
               background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:999,padding:"5px 9px",
@@ -1589,7 +1586,6 @@ function BeachlineTreeView({
               Center Selection
             </button>
           </div>
-          <div style={{color:theme.textDimmer,fontSize:10}}>Trackpad: two-finger pan</div>
         </div>
         <div style={emptyViewportStyle}>
           <div style={{
@@ -1603,7 +1599,7 @@ function BeachlineTreeView({
             lineHeight:1.6,
             padding:"0 24px",
           }}>
-            The tree viewport is reserved here so the sidebar stays stable while the sweep begins.
+            No live tree yet.
           </div>
           <div style={{
             pointerEvents:"none",
@@ -1772,10 +1768,7 @@ function BeachlineTreeView({
 
   return (
     <div onMouseLeave={onLeaveTree}>
-      <div style={{ color: theme.textDim, lineHeight: 1.5, marginBottom: 10 }}>
-        Hover for a quick preview. Click a node to lock it on, then use two-finger pan or drag empty space to move around the tree.
-      </div>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"flex-start",gap:8,marginBottom:10,flexWrap:"wrap"}}>
         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
           <button onClick={() => centerNode(debug.tree.rootId)} style={{
             background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:999,padding:"5px 9px",
@@ -1790,7 +1783,6 @@ function BeachlineTreeView({
             Center Selection
           </button>
         </div>
-        <div style={{color:theme.textDimmer,fontSize:10}}>Trackpad: two-finger pan</div>
       </div>
       <div style={{
         position:"relative",
@@ -2018,10 +2010,7 @@ function StructuresSidebar({
         <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
           <div>
             <div style={{fontFamily:"'DM Sans',sans-serif",fontWeight:700,fontSize:16,color:theme.heading}}>
-              Structures Sidebar
-            </div>
-            <div style={{color:theme.textDim,fontSize:12,lineHeight:1.5,marginTop:4}}>
-              Live geometry and breakpoint state while you step, jump, or scrub the sweep.
+              Structures
             </div>
           </div>
           <button onClick={onClose} style={{
@@ -2097,9 +2086,6 @@ function StructuresSidebar({
           summary={panelData.queue?`${panelData.queue.length} events`:"—"}
           expanded={panelExpanded.queue} onToggle={()=>setPanelExpanded(p=>({...p,queue:!p.queue}))}>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{color:theme.textDim,lineHeight:1.5}}>
-              Hover an event to preview where it lands on the canvas. Click an event to jump the sweep directly to it.
-            </div>
             <div style={{display:"flex",justifyContent:"flex-start",gap:8,flexWrap:"wrap"}}>
               <button
                 onClick={onStepToPreviousEvent}
@@ -2196,10 +2182,6 @@ function StructuresSidebar({
           expanded={panelExpanded.dcel} onToggle={()=>setPanelExpanded(p=>({...p,dcel:!p.dcel}))}>
           {panelData.dcel ? (
             <div style={{display:"grid",gap:10}}>
-              <div style={{color:theme.textDim,lineHeight:1.5}}>
-                Inspect the clipped DCEL for the processed cells. Vertices expose one incident half-edge, faces expose outer and inner boundary handles, and half-edges expose their local topology.
-              </div>
-
               <div>
                 <div style={{color:theme.textMuted,marginBottom:6,fontSize:11,textTransform:"uppercase",letterSpacing:"0.04em"}}>
                   Vertices
@@ -2359,7 +2341,7 @@ export default function VoronoiVisualizer() {
   const [showBeach, setShowBeach] = useState(true);
   const [showCircles, setShowCircles] = useState(true);
   const [showEdges, setShowEdges] = useState(true);
-  const [darkMode, setDarkMode] = useState(true);
+  const [darkMode, setDarkMode] = useState(false);
   const [showPanel, setShowPanel] = useState(true);
   const [panelExpanded, setPanelExpanded] = useState({ dcel:false, queue:false, beach:true });
   const [panelData, setPanelData] = useState({ dcel:null, queue:null, beach:null });
