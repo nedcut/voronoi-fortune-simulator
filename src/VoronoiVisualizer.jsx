@@ -908,7 +908,7 @@ function col(i){ return COLS[i%COLS.length]; }
 
 function makeHudState(algo, sweepX) {
   return {
-    sweepX: Math.round(sweepX),
+    sweepX: roundCoord(sweepX, 2),
     stepCount: algo ? algo.stepCount : null,
     queueLength: algo ? algo.getQueueLength() : null,
     vertices: algo ? algo.vertices.length : null,
@@ -1145,6 +1145,14 @@ function layoutBeachlineTree(tree) {
   return { width, height, nodes: renderedNodes, nodesById };
 }
 
+function getParabolaSampleCount(arc, sweepX) {
+  const span = Math.max(0, arc.yBot - arc.yTop);
+  const directrixGap = Math.max(2, Math.abs(arc.site.x - sweepX));
+  const baseSegments = Math.ceil(span / 3);
+  const curvatureBoost = Math.ceil(180 / directrixGap);
+  return clamp(baseSegments + curvatureBoost, 96, 320);
+}
+
 function drawArcStroke(ctx, arc, sweepX, W, H, strokeStyle, lineWidth, alpha = 1) {
   const y0 = Math.max(0, arc.yTop);
   const y1 = Math.min(H, arc.yBot);
@@ -1154,15 +1162,17 @@ function drawArcStroke(ctx, arc, sweepX, W, H, strokeStyle, lineWidth, alpha = 1
   ctx.strokeStyle = strokeStyle;
   ctx.lineWidth = lineWidth;
   ctx.globalAlpha = alpha;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
   ctx.beginPath();
-  const N = 80;
+  const N = getParabolaSampleCount(arc, sweepX);
   const dy = (y1 - y0) / N;
   let started = false;
   for (let i = 0; i <= N; i++) {
     const y = y0 + i * dy;
     const x = parabolaX(arc.site, sweepX, y);
-    if (!isFinite(x) || x < -100 || x > W + 100) continue;
-    const cx = Math.max(-10, Math.min(W + 10, x));
+    if (!isFinite(x) || x < -140 || x > W + 140) continue;
+    const cx = Math.max(-18, Math.min(W + 18, x));
     if (!started) {
       ctx.moveTo(cx, y);
       started = true;
@@ -1392,8 +1402,9 @@ function drawSidebarFocuses(ctx, pinnedSidebarFocuses, hoveredSidebarFocus, beac
 
 // ─── Canvas draw ────────────────────────────────────────────────────────────
 function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme, pinnedSidebarFocuses = [], hoveredSidebarFocus = null) {
-  const dpr = window.devicePixelRatio||1;
-  ctx.save(); ctx.scale(dpr,dpr);
+  const renderScale = ctx.canvas.width / W;
+  ctx.save();
+  ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
   ctx.clearRect(0,0,W,H);
 
   ctx.fillStyle = theme.bg; ctx.fillRect(0,0,W,H);
@@ -1548,10 +1559,71 @@ function BeachlineTreeView({
   onLeaveTree,
   onToggleNode,
 }) {
+  const emptyViewportStyle = {
+    position:"relative",
+    border:`1px solid ${theme.panelBorder}`,
+    borderRadius:14,
+    background:`radial-gradient(circle at top, ${theme.btnBg} 0%, ${theme.panelBg} 72%)`,
+    padding:12,
+    boxShadow:`inset 0 1px 0 ${theme.panelBorder}55`,
+  };
+
   if (!debug?.tree) {
     return (
-      <div style={{ color: theme.textDim, lineHeight: 1.6 }}>
-        Start the sweep to inspect the live breakpoint tree.
+      <div>
+        <div style={{ color: theme.textDim, lineHeight: 1.5, marginBottom: 10 }}>
+          Start the sweep to inspect the live breakpoint tree.
+        </div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:8}}>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            <button disabled style={{
+              background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:999,padding:"5px 9px",
+              cursor:"default",color:theme.textDimmer,opacity:0.5,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+            }}>
+              Root
+            </button>
+            <button disabled style={{
+              background:theme.btnBg,border:`1px solid ${theme.btnBorder}`,borderRadius:999,padding:"5px 9px",
+              cursor:"default",color:theme.textDimmer,opacity:0.5,fontSize:10,fontFamily:"'JetBrains Mono',monospace"
+            }}>
+              Center Selection
+            </button>
+          </div>
+          <div style={{color:theme.textDimmer,fontSize:10}}>Trackpad: two-finger pan</div>
+        </div>
+        <div style={emptyViewportStyle}>
+          <div style={{
+            height:"min(430px, 54vh)",
+            minHeight:280,
+            display:"flex",
+            alignItems:"center",
+            justifyContent:"center",
+            color:theme.textDim,
+            textAlign:"center",
+            lineHeight:1.6,
+            padding:"0 24px",
+          }}>
+            The tree viewport is reserved here so the sidebar stays stable while the sweep begins.
+          </div>
+          <div style={{
+            pointerEvents:"none",
+            position:"absolute",
+            inset:12,
+            borderRadius:12,
+            boxShadow:`inset 0 18px 24px -24px ${theme.pageBg}, inset 0 -18px 24px -24px ${theme.pageBg}`,
+          }}/>
+        </div>
+        <div style={{ color: theme.textMuted, marginTop: 10, marginBottom: 4 }}>Order:</div>
+        <div style={{
+          color: theme.textDim,
+          lineHeight: 1.6,
+          background: theme.btnBg,
+          border:`1px solid ${theme.panelBorder}`,
+          borderRadius:12,
+          padding:"8px 10px",
+        }}>
+          —
+        </div>
       </div>
     );
   }
@@ -2276,6 +2348,8 @@ function StructuresSidebar({
 
 // ─── Component ──────────────────────────────────────────────────────────────
 export default function VoronoiVisualizer() {
+  const FINE_SCRUB_STEP = 0.25;
+  const COARSE_SCRUB_STEP = 2;
   const [sites, setSites] = useState([]);
   const [mode, setMode] = useState("place");
   const [playing, setPlaying] = useState(false);
@@ -2626,8 +2700,8 @@ export default function VoronoiVisualizer() {
   useEffect(()=>{
     const handler=(e)=>{
       if(e.target.tagName==="INPUT")return;
-      if(e.key==="ArrowRight"&&(mode==="animate"||mode==="done")&&!playing){e.preventDefault();stepPx(e.shiftKey?10:1);}
-      else if(e.key==="ArrowLeft"&&(mode==="animate"||mode==="done")&&!playing){e.preventDefault();stepPx(e.shiftKey?-10:-1);}
+      if(e.key==="ArrowRight"&&(mode==="animate"||mode==="done")&&!playing){e.preventDefault();stepPx(e.shiftKey?COARSE_SCRUB_STEP:FINE_SCRUB_STEP);}
+      else if(e.key==="ArrowLeft"&&(mode==="animate"||mode==="done")&&!playing){e.preventDefault();stepPx(e.shiftKey?-COARSE_SCRUB_STEP:-FINE_SCRUB_STEP);}
       else if(e.key===" "){
         e.preventDefault();
         if(mode==="animate")setPlaying(p=>{prevTimestamp.current=0;return!p;});
@@ -2637,7 +2711,7 @@ export default function VoronoiVisualizer() {
     };
     window.addEventListener("keydown",handler);
     return()=>window.removeEventListener("keydown",handler);
-  },[mode,playing,stepPx,stepToNext,startPlay,sites.length]);
+  },[mode,playing,stepPx,stepToNext,startPlay,sites.length,FINE_SCRUB_STEP,COARSE_SCRUB_STEP]);
 
   const reset=useCallback(()=>{
     setPlaying(false);cancelAnimationFrame(anim.current);
@@ -2672,6 +2746,10 @@ export default function VoronoiVisualizer() {
   const sidebarButtonLabel = showPanel ? "Hide Sidebar" : "Open Sidebar";
   const layoutMaxWidth = isDockedSidebar ? Math.max(1360, dockedSidebarWidth + 920) : 980;
   const stageMaxWidth = 860;
+  const targetRenderWidth = 3840;
+  const renderScale = Math.max(dpr, targetRenderWidth / W);
+  const renderBufferWidth = Math.round(W * renderScale);
+  const renderBufferHeight = Math.round(H * renderScale);
 
   return(
     <div style={{minHeight:"100vh",background:theme.pageBg,color:theme.text,fontFamily:"'DM Sans',sans-serif",display:"flex",flexDirection:"column",alignItems:"center",padding:"20px 16px",position:"relative"}}>
@@ -2697,7 +2775,7 @@ export default function VoronoiVisualizer() {
           </div>
 
           <div style={{width:"100%",maxWidth:stageMaxWidth,position:"relative",borderRadius:18,overflow:"hidden",border:`1px solid ${theme.panelBorder}`,boxShadow:theme.shadow,flexShrink:0}}>
-            <canvas ref={cvs} width={W*dpr} height={H*dpr} onClick={onClick} onContextMenu={onCtx}
+            <canvas ref={cvs} width={renderBufferWidth} height={renderBufferHeight} onClick={onClick} onContextMenu={onCtx}
               onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
               style={{width:"min(860px,calc(100vw - 32px))",height:"auto",cursor:mode==="place"?(dragging.current?"grabbing":"crosshair"):canvasCursor,display:"block"}}/>
 
@@ -2722,12 +2800,12 @@ export default function VoronoiVisualizer() {
                   <button onClick={()=>{setPlaying(p=>!p);prevTimestamp.current=0;}} disabled={mode==="done"}
                     style={{...bS(!playing),opacity:mode==="done"?0.4:1}}>
                     {playing?"⏸ Pause":"▶ Resume"}</button>
-                  <button onClick={()=>stepPx(-1)} disabled={playing}
+                  <button onClick={()=>stepPx(-FINE_SCRUB_STEP)} disabled={playing}
                     style={{...bS(false),opacity:playing?0.4:1}}>
-                    ← 1px</button>
-                  <button onClick={()=>stepPx(1)} disabled={playing||mode==="done"}
+                    ← {FINE_SCRUB_STEP}px</button>
+                  <button onClick={()=>stepPx(FINE_SCRUB_STEP)} disabled={playing||mode==="done"}
                     style={{...bS(false),opacity:(playing||mode==="done")?0.4:1}}>
-                    1px →</button>
+                    {FINE_SCRUB_STEP}px →</button>
                   <button onClick={stepToNext} disabled={playing||mode==="done"}
                     style={{...bS(false),opacity:(playing||mode==="done")?0.4:1}}>
                     Next event →</button>
