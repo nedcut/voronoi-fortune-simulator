@@ -708,6 +708,10 @@ class FortuneAlgo {
   }
 
   getEdges() {
+    return this.getEdgesForRender(this.sweepX, false);
+  }
+
+  getEdgesForRender(renderSweepX = this.sweepX, suppressAnimationStubs = false) {
     const bound = Math.max(this.W, this.H) * 2;
     const rawEdges = this.edges
       .filter(e => {
@@ -736,7 +740,11 @@ class FortuneAlgo {
         };
       });
 
-    return mergeDebugEdges(rawEdges).map(edge => ({
+    const filteredEdges = suppressAnimationStubs
+      ? this._suppressAnimationStubEdges(rawEdges, renderSweepX)
+      : rawEdges;
+
+    return mergeDebugEdges(filteredEdges).map(edge => ({
       x1: edge.x1,
       y1: edge.y1,
       x2: edge.x2,
@@ -761,6 +769,31 @@ class FortuneAlgo {
       else{y=y1+(y2-y1)*(xn-x1)/(x2-x1);x=xn;}
       if(o===c1){x1=x;y1=y;c1=c(x1,y1);}else{x2=x;y2=y;c2=c(x2,y2);}
     } return false;
+  }
+
+  _suppressAnimationStubEdges(rawEdges, renderSweepX, maxStubLength = 6, eps = 1.25) {
+    const growingByPair = new Map();
+    for (const edge of this.edges) {
+      if (edge.end) continue;
+      if (!edge.topSite || !edge.botSite) continue;
+      if (edge.topSite.x > renderSweepX || edge.botSite.x > renderSweepX) continue;
+      const by = breakpointY(edge.topSite, edge.botSite, renderSweepX);
+      const bx = parabolaX(edge.topSite, renderSweepX, by);
+      if (!isFinite(bx) || !isFinite(by)) continue;
+      const pair = `${Math.min(edge.left.id, edge.right.id)}-${Math.max(edge.left.id, edge.right.id)}`;
+      const group = growingByPair.get(pair);
+      const snapshot = { start: edge.start, end: { x: bx, y: by } };
+      if (group) group.push(snapshot);
+      else growingByPair.set(pair, [snapshot]);
+    }
+
+    return rawEdges.filter(edge => {
+      const length = Math.hypot(edge.x2 - edge.x1, edge.y2 - edge.y1);
+      if (length > maxStubLength) return true;
+      const growing = growingByPair.get(`${edge.siteAId}-${edge.siteBId}`);
+      if (!growing?.length) return true;
+      return !growing.some(candidate => Math.hypot(edge.x1 - candidate.start.x, edge.y1 - candidate.start.y) <= eps);
+    });
   }
   getPending() { return this.queue.filter(e=>e.type===CIRCLE&&!e.invalid).map(e=>({center:e.center,radius:e.radius,x:e.x})); }
 
@@ -1456,7 +1489,9 @@ function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme,
   if (algo && (mode === "animate" || mode === "done")) {
     // ── Completed edges ──
     if (opts.edges) {
-      const edges = mode === "done" ? algo.getClippedEdges() : algo.getEdges();
+      const edges = mode === "done"
+        ? algo.getClippedEdges()
+        : algo.getEdgesForRender(sx, true);
       ctx.lineCap = "round"; ctx.strokeStyle = theme.edgeStroke; ctx.lineWidth = 1.6;
       for (const e of edges) {
         const cl = clipLine(e.x1,e.y1,e.x2,e.y2,-2,-2,W+2,H+2);
