@@ -431,6 +431,24 @@ function buildDerivedDCEL(activeSites, W, H) {
   };
 }
 
+function buildCanvasEdgesFromDCEL(dcel) {
+  const uniqueEdges = new Map();
+  for (const edge of dcel.halfEdges) {
+    if (edge.incidentFace === "f_out") continue;
+    const key = edge.origin < edge.destination
+      ? `${edge.origin}:${edge.destination}`
+      : `${edge.destination}:${edge.origin}`;
+    if (uniqueEdges.has(key)) continue;
+    uniqueEdges.set(key, {
+      x1: edge.x1,
+      y1: edge.y1,
+      x2: edge.x2,
+      y2: edge.y2,
+    });
+  }
+  return [...uniqueEdges.values()];
+}
+
 const SITE=0, CIRCLE=1;
 
 function makeEventDebugId(evt) {
@@ -726,6 +744,10 @@ class FortuneAlgo {
     }));
   }
 
+  getClippedEdges() {
+    return buildCanvasEdgesFromDCEL(buildDerivedDCEL(this.sites, this.W, this.H));
+  }
+
   _clipTest(x1,y1,x2,y2,xn,yn,xx,yx) {
     const I=0,L=1,R=2,B=4,T=8;
     function c(x,y){ let r=I; if(x<xn)r|=L;else if(x>xx)r|=R; if(y<yn)r|=T;else if(y>yx)r|=B; return r; }
@@ -835,7 +857,7 @@ function computeStatic(sites, W, H) {
   if (sites.length < 2) return [];
   const a = new FortuneAlgo(sites, W, H);
   completeAlgorithm(a, W);
-  return a.getEdges();
+  return a.getClippedEdges();
 }
 
 function clipLine(x1,y1,x2,y2,xn,yn,xx,yx) {
@@ -1434,7 +1456,7 @@ function draw(ctx, W, H, sites, algo, displaySweepX, opts, preview, mode, theme,
   if (algo && (mode === "animate" || mode === "done")) {
     // ── Completed edges ──
     if (opts.edges) {
-      const edges = algo.getEdges();
+      const edges = mode === "done" ? algo.getClippedEdges() : algo.getEdges();
       ctx.lineCap = "round"; ctx.strokeStyle = theme.edgeStroke; ctx.lineWidth = 1.6;
       for (const e of edges) {
         const cl = clipLine(e.x1,e.y1,e.x2,e.y2,-2,-2,W+2,H+2);
