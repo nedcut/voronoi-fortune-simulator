@@ -91,8 +91,22 @@ function unitBallPoint(theta, radius, p) {
   return { x: (cos / denom) * radius, y: (sin / denom) * radius };
 }
 
-function drawWavefront(ctx, sites, controls, p, time) {
+function nearestSiteIndex(point, sites, maxDistance = 18) {
+  let best = -1;
+  let bestDistance = maxDistance;
+  for (let i = 0; i < sites.length; i++) {
+    const d = lpDistance(point, sites[i], 2);
+    if (d < bestDistance) {
+      best = i;
+      bestDistance = d;
+    }
+  }
+  return best;
+}
+
+function drawWavefront(ctx, sites, controls, p, time, highlightedSiteIndex = null) {
   const renderScale = ctx.canvas.width / CANVAS_WIDTH;
+  const hasHighlight = highlightedSiteIndex != null;
   ctx.save();
   ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
   ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -116,7 +130,10 @@ function drawWavefront(ctx, sites, controls, p, time) {
         if (owner === -1 || bestArrival > time) continue;
         const rgb = hexToRgb(colorForSite(owner));
         const freshness = Math.max(0, Math.min(1, 1 - (time - bestArrival) / 80));
-        ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${0.16 + freshness * 0.1})`;
+        const highlightBoost = hasHighlight && owner === highlightedSiteIndex ? 0.12 : 0;
+        const dim = hasHighlight && owner !== highlightedSiteIndex ? 0.45 : 1;
+        const alpha = (0.16 + freshness * 0.1 + highlightBoost) * dim;
+        ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})`;
         ctx.fillRect(x, y, SAMPLE_SIZE, SAMPLE_SIZE);
       }
     }
@@ -127,8 +144,8 @@ function drawWavefront(ctx, sites, controls, p, time) {
       const radius = Math.max(0, control.startRadius + control.speed * time);
       ctx.save();
       ctx.strokeStyle = colorForSite(i);
-      ctx.globalAlpha = 0.58;
-      ctx.lineWidth = 2;
+      ctx.globalAlpha = hasHighlight && i !== highlightedSiteIndex ? 0.18 : 0.7;
+      ctx.lineWidth = hasHighlight && i === highlightedSiteIndex ? 3 : 2;
       ctx.setLineDash([7, 5]);
       const steps = 180;
       let drawing = false;
@@ -157,14 +174,23 @@ function drawWavefront(ctx, sites, controls, p, time) {
 
   for (let i = 0; i < sites.length; i++) {
     const site = sites[i];
+    const highlighted = i === highlightedSiteIndex;
+    if (highlighted) {
+      ctx.fillStyle = `${colorForSite(i)}33`;
+      ctx.beginPath();
+      ctx.arc(site.x, site.y, 18, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = hasHighlight && !highlighted ? 0.42 : 1;
     ctx.fillStyle = colorForSite(i);
     ctx.beginPath();
-    ctx.arc(site.x, site.y, 7, 0, Math.PI * 2);
+    ctx.arc(site.x, site.y, highlighted ? 9 : 7, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = "rgba(255,255,255,0.95)";
     ctx.beginPath();
-    ctx.arc(site.x, site.y, 2.8, 0, Math.PI * 2);
+    ctx.arc(site.x, site.y, highlighted ? 3.6 : 2.8, 0, Math.PI * 2);
     ctx.fill();
+    ctx.globalAlpha = 1;
   }
 
   if (!sites.length) {
@@ -189,6 +215,7 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   const [customP, setCustomP] = useState(3);
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [hoveredSiteIndex, setHoveredSiteIndex] = useState(null);
   const previousFrame = useRef(0);
   const canvasRef = useRef(null);
   const rafRef = useRef(null);
@@ -211,8 +238,8 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    drawWavefront(canvas.getContext("2d"), sites, controls, metricP, time);
-  }, [sites, controls, metricP, time]);
+    drawWavefront(canvas.getContext("2d"), sites, controls, metricP, time, hoveredSiteIndex);
+  }, [sites, controls, metricP, time, hoveredSiteIndex]);
 
   useEffect(() => {
     if (!playing) return;
@@ -279,30 +306,35 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   const startDragSite = useCallback(event => {
     if (event.button !== 0) return;
     const point = canvasPoint(event);
-    for (let i = 0; i < sites.length; i++) {
-      if (lpDistance(point, sites[i], 2) < 15) {
-        dragging.current = { index: i, startX: point.x, startY: point.y, moved: false };
-        return;
-      }
+    const index = nearestSiteIndex(point, sites, 15);
+    if (index !== -1) {
+      setHoveredSiteIndex(index);
+      dragging.current = { index, startX: point.x, startY: point.y, moved: false };
+      return;
     }
     dragging.current = null;
   }, [canvasPoint, sites]);
 
-  const dragSite = useCallback(event => {
+  const handleCanvasMove = useCallback(event => {
     const current = dragging.current;
-    if (!current) return;
     const point = canvasPoint(event);
+    if (!current) {
+      const index = nearestSiteIndex(point, sites, 18);
+      setHoveredSiteIndex(index === -1 ? null : index);
+      return;
+    }
     const x = Math.max(5, Math.min(CANVAS_WIDTH - 5, point.x));
     const y = Math.max(5, Math.min(CANVAS_HEIGHT - 5, point.y));
     if (!current.moved && lpDistance({ x, y }, { x: current.startX, y: current.startY }, 2) < 3) return;
     current.moved = true;
+    setHoveredSiteIndex(current.index);
     setSites(sites => {
       if (!sites[current.index]) return sites;
       const next = [...sites];
       next[current.index] = { x, y };
       return next;
     });
-  }, [canvasPoint, setSites]);
+  }, [canvasPoint, sites, setSites]);
 
   const endDragSite = useCallback(() => {
     if (dragging.current) setTimeout(() => { dragging.current = null; }, 0);
@@ -322,6 +354,12 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
       return next;
     });
   }, [sites.length]);
+
+  const sliderStyle = {
+    width: "100%",
+    accentColor: "#ca8a04",
+    cursor: "pointer",
+  };
 
   const buttonStyle = active => ({
     background: active ? "#0f172a" : "#ffffff",
@@ -357,9 +395,12 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
             onClick={addSite}
             onContextMenu={removeSite}
             onMouseDown={startDragSite}
-            onMouseMove={dragSite}
+            onMouseMove={handleCanvasMove}
             onMouseUp={endDragSite}
-            onMouseLeave={endDragSite}
+            onMouseLeave={() => {
+              endDragSite();
+              setHoveredSiteIndex(null);
+            }}
             style={{width:`min(${CANVAS_WIDTH}px,calc(100vw - 32px))`,height:"auto",cursor:dragging.current ? "grabbing" : "crosshair",display:"block"}}
           />
         </div>
@@ -424,33 +465,53 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
               <div style={{color:"#64748b",lineHeight:1.8}}>Add sites to tune their start radius and speed.</div>
             ) : sites.map((site, index) => {
               const control = getSiteControl(controls, index);
+              const highlighted = hoveredSiteIndex === index;
               return (
-                <div key={index} style={{display:"grid",gridTemplateColumns:"44px 1fr 1fr",gap:8,alignItems:"center",marginTop:index ? 8 : 0}}>
+                <div
+                  key={index}
+                  onMouseEnter={() => setHoveredSiteIndex(index)}
+                  onMouseLeave={() => setHoveredSiteIndex(null)}
+                  style={{
+                    display:"grid",
+                    gridTemplateColumns:"42px minmax(0, 1fr)",
+                    gap:10,
+                    alignItems:"center",
+                    marginTop:index ? 10 : 0,
+                    padding:"8px 10px",
+                    borderRadius:8,
+                    border:`1px solid ${highlighted ? colorForSite(index) : "#e2e8f0"}`,
+                    background:highlighted ? `${colorForSite(index)}14` : "#f8fafc",
+                  }}
+                >
                   <span style={{color:colorForSite(index),fontWeight:700}}>s{index}</span>
-                  <label style={{display:"flex",alignItems:"center",gap:5,color:"#64748b"}}>
-                    start
-                    <input
-                      type="number"
-                      min={0}
-                      max={160}
-                      step={5}
-                      value={formatNumber(control.startRadius)}
-                      onChange={event => updateControl(index, "startRadius", event.target.value)}
-                      style={{width:56,border:"1px solid #cbd5e1",borderRadius:6,padding:"4px 6px",fontSize:11,color:"#334155",fontFamily:"'JetBrains Mono',monospace"}}
-                    />
-                  </label>
-                  <label style={{display:"flex",alignItems:"center",gap:5,color:"#64748b"}}>
-                    speed
-                    <input
-                      type="number"
-                      min={0.05}
-                      max={4}
-                      step={0.05}
-                      value={formatNumber(control.speed)}
-                      onChange={event => updateControl(index, "speed", event.target.value)}
-                      style={{width:56,border:"1px solid #cbd5e1",borderRadius:6,padding:"4px 6px",fontSize:11,color:"#334155",fontFamily:"'JetBrains Mono',monospace"}}
-                    />
-                  </label>
+                  <div style={{display:"grid",gap:8}}>
+                    <label style={{display:"grid",gridTemplateColumns:"42px 1fr 38px",gap:8,alignItems:"center",color:"#64748b"}}>
+                      start
+                      <input
+                        type="range"
+                        min={0}
+                        max={160}
+                        step={1}
+                        value={control.startRadius}
+                        onChange={event => updateControl(index, "startRadius", event.target.value)}
+                        style={sliderStyle}
+                      />
+                      <span style={{color:"#334155",textAlign:"right"}}>{formatNumber(control.startRadius)}</span>
+                    </label>
+                    <label style={{display:"grid",gridTemplateColumns:"42px 1fr 38px",gap:8,alignItems:"center",color:"#64748b"}}>
+                      speed
+                      <input
+                        type="range"
+                        min={0.05}
+                        max={4}
+                        step={0.05}
+                        value={control.speed}
+                        onChange={event => updateControl(index, "speed", event.target.value)}
+                        style={sliderStyle}
+                      />
+                      <span style={{color:"#334155",textAlign:"right"}}>{formatNumber(control.speed)}</span>
+                    </label>
+                  </div>
                 </div>
               );
             })}
