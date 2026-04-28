@@ -1,4 +1,12 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import {
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
+  COARSE_SCRUB_STEP,
+  FINE_SCRUB_STEP,
+  TARGET_RENDER_WIDTH,
+} from "./appConstants.js";
+import { clamp, distance, nearlySamePoint, roundCoord, samePoint } from "./geometry.js";
 
 /*
  * ═══════════════════════════════════════════════════════════════════════════
@@ -8,9 +16,6 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
  * Algorithm events are processed when the sweep reaches them.
  * ═══════════════════════════════════════════════════════════════════════════
  */
-
-function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
-function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
 function normalizeWheelDelta(delta, deltaMode) {
   if (deltaMode === 1) return delta * 18;
@@ -50,10 +55,6 @@ function breakpointY(upper, lower, sweepX) {
   const y1 = (-B - Math.sqrt(disc)) / (2*A);
   const y2 = (-B + Math.sqrt(disc)) / (2*A);
   return a.x < b.x ? Math.min(y1, y2) : Math.max(y1, y2);
-}
-
-function samePoint(a, b, eps = 0.75) {
-  return Math.hypot(a.x - b.x, a.y - b.y) <= eps;
 }
 
 function mergeCollinearDebugEdges(a, b, eps = 0.75) {
@@ -138,15 +139,6 @@ function mergeDebugEdges(edges) {
     if (a.siteBId !== b.siteBId) return a.siteBId - b.siteBId;
     return a.sourceIds[0] - b.sourceIds[0];
   });
-}
-
-function roundCoord(value, places = 1) {
-  const scale = 10 ** places;
-  return Math.round(value * scale) / scale;
-}
-
-function nearlySamePoint(a, b, eps = 1e-4) {
-  return Math.hypot(a.x - b.x, a.y - b.y) <= eps;
 }
 
 function polygonArea(points) {
@@ -542,11 +534,11 @@ class FortuneAlgo {
     const cross = (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);
     if (cross >= 0) return;
     // Reject nearly-collinear triples (|cross| very small relative to distances)
-    const abLen = dist(a, b), bcLen = dist(b, c);
+    const abLen = distance(a, b), bcLen = distance(b, c);
     if (Math.abs(cross) < 1e-4 * abLen * bcLen) return;
     const ctr = circumcenter(a, b, c);
     if (!ctr) return;
-    const r = dist(ctr, a);
+    const r = distance(ctr, a);
     // Reject circumcenters far outside the bounding box — these are degenerate
     const margin = Math.max(this.W, this.H) * 3;
     if (ctr.x < -margin || ctr.x > this.W + margin || ctr.y < -margin || ctr.y > this.H + margin) return;
@@ -2387,8 +2379,6 @@ function StructuresSidebar({
 
 // ─── Component ──────────────────────────────────────────────────────────────
 export default function VoronoiVisualizer() {
-  const FINE_SCRUB_STEP = 0.25;
-  const COARSE_SCRUB_STEP = 2;
   const [sites, setSites] = useState([]);
   const [mode, setMode] = useState("place");
   const [playing, setPlaying] = useState(false);
@@ -2425,7 +2415,7 @@ export default function VoronoiVisualizer() {
   const dockedSidebarWidth = clamp(Math.round(viewportWidth * 0.3), 430, 500);
   const drawerSidebarWidth = Math.min(480, Math.max(340, viewportWidth - 20));
 
-  const W=860, H=520;
+  const W=CANVAS_WIDTH, H=CANVAS_HEIGHT;
 
   useEffect(() => { document.body.style.background = theme.pageBg; }, [theme]);
   useEffect(() => {
@@ -2784,8 +2774,8 @@ export default function VoronoiVisualizer() {
   });
   const sidebarButtonLabel = showPanel ? "Hide Sidebar" : "Open Sidebar";
   const layoutMaxWidth = isDockedSidebar ? Math.max(1360, dockedSidebarWidth + 920) : 980;
-  const stageMaxWidth = 860;
-  const targetRenderWidth = 3840;
+  const stageMaxWidth = CANVAS_WIDTH;
+  const targetRenderWidth = TARGET_RENDER_WIDTH;
   const renderScale = Math.max(dpr, targetRenderWidth / W);
   const renderBufferWidth = Math.round(W * renderScale);
   const renderBufferHeight = Math.round(H * renderScale);
@@ -2816,7 +2806,7 @@ export default function VoronoiVisualizer() {
           <div style={{width:"100%",maxWidth:stageMaxWidth,position:"relative",borderRadius:18,overflow:"hidden",border:`1px solid ${theme.panelBorder}`,boxShadow:theme.shadow,flexShrink:0}}>
             <canvas ref={cvs} width={renderBufferWidth} height={renderBufferHeight} onClick={onClick} onContextMenu={onCtx}
               onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
-              style={{width:"min(860px,calc(100vw - 32px))",height:"auto",cursor:mode==="place"?(dragging.current?"grabbing":"crosshair"):canvasCursor,display:"block"}}/>
+              style={{width:`min(${CANVAS_WIDTH}px,calc(100vw - 32px))`,height:"auto",cursor:mode==="place"?(dragging.current?"grabbing":"crosshair"):canvasCursor,display:"block"}}/>
 
             {mode==="animate"&&hud.lastEventType!=null&&(
               <div style={{position:"absolute",top:10,left:10,
