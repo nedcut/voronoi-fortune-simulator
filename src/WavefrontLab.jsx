@@ -14,7 +14,7 @@ const METRICS = [
   { id: "custom", label: "Lp", p: null },
 ];
 
-const SAMPLE_SIZE = 2;
+const SAMPLE_SIZE = 1;
 const DEFAULT_START_RADIUS = 0;
 const DEFAULT_SPEED = 1;
 const MIN_FINISH_TIME = 80;
@@ -33,6 +33,17 @@ function hexToRgb(hex) {
   };
 }
 
+const SITE_RGB = SITE_COLORS.map(hexToRgb);
+
+let scratchCanvas = null;
+
+function getScratchCanvas() {
+  if (!scratchCanvas) scratchCanvas = document.createElement("canvas");
+  if (scratchCanvas.width !== CANVAS_WIDTH) scratchCanvas.width = CANVAS_WIDTH;
+  if (scratchCanvas.height !== CANVAS_HEIGHT) scratchCanvas.height = CANVAS_HEIGHT;
+  return scratchCanvas;
+}
+
 function formatNumber(value) {
   return Number.isInteger(value) ? `${value}` : value.toFixed(1);
 }
@@ -48,16 +59,26 @@ function normalizeControls(controls, siteCount) {
   }));
 }
 
-function arrivalTime(point, site, control, p) {
-  const speed = Math.max(0.05, control.speed);
-  return Math.max(0, (lpDistance(point, site, p) - control.startRadius) / speed);
+function metricDistanceAt(x, y, site, p) {
+  const dx = Math.abs(x - site.x);
+  const dy = Math.abs(y - site.y);
+  if (p === Infinity) return Math.max(dx, dy);
+  if (p === 1) return dx + dy;
+  if (p === 2) return Math.hypot(dx, dy);
+  if (Math.abs(p) < 1e-6) return Math.max(dx, dy);
+  return (dx ** p + dy ** p) ** (1 / p);
 }
 
-function ownerAt(point, sites, controls, p) {
+function arrivalTimeAt(x, y, site, control, p) {
+  const speed = Math.max(0.05, control.speed);
+  return Math.max(0, (metricDistanceAt(x, y, site, p) - control.startRadius) / speed);
+}
+
+function ownerAtXY(x, y, sites, controls, p) {
   let owner = -1;
   let bestArrival = Infinity;
   for (let i = 0; i < sites.length; i++) {
-    const t = arrivalTime(point, sites[i], getSiteControl(controls, i), p);
+    const t = arrivalTimeAt(x, y, sites[i], getSiteControl(controls, i), p);
     if (t < bestArrival) {
       bestArrival = t;
       owner = i;
@@ -66,17 +87,83 @@ function ownerAt(point, sites, controls, p) {
   return { owner, arrival: bestArrival };
 }
 
-function computeFinishTime(sites, controls, p) {
-  if (!sites.length) return MIN_FINISH_TIME;
+function buildWavefrontField(sites, controls, p) {
+  if (!sites.length) {
+    return {
+      owners: null,
+      arrivals: null,
+      imageData: null,
+      finishTime: MIN_FINISH_TIME,
+    };
+  }
+
+  const count = CANVAS_WIDTH * CANVAS_HEIGHT;
+  const owners = new Int16Array(count);
+  const arrivals = new Float32Array(count);
+  const imageData = new ImageData(CANVAS_WIDTH, CANVAS_HEIGHT);
   let maxArrival = MIN_FINISH_TIME;
-  for (let x = 0; x < CANVAS_WIDTH; x += SAMPLE_SIZE) {
-    for (let y = 0; y < CANVAS_HEIGHT; y += SAMPLE_SIZE) {
-      const point = { x: x + SAMPLE_SIZE / 2, y: y + SAMPLE_SIZE / 2 };
-      const result = ownerAt(point, sites, controls, p);
-      if (Number.isFinite(result.arrival)) maxArrival = Math.max(maxArrival, result.arrival);
+
+  for (let y = 0; y < CANVAS_HEIGHT; y += SAMPLE_SIZE) {
+    const sampleY = y + SAMPLE_SIZE / 2;
+    for (let x = 0; x < CANVAS_WIDTH; x += SAMPLE_SIZE) {
+      const sampleX = x + SAMPLE_SIZE / 2;
+      let owner = -1;
+      let bestArrival = Infinity;
+      for (let i = 0; i < sites.length; i++) {
+        const t = arrivalTimeAt(sampleX, sampleY, sites[i], getSiteControl(controls, i), p);
+        if (t < bestArrival) {
+          bestArrival = t;
+          owner = i;
+        }
+      }
+
+      const index = y * CANVAS_WIDTH + x;
+      owners[index] = owner;
+      arrivals[index] = bestArrival;
+      if (Number.isFinite(bestArrival)) maxArrival = Math.max(maxArrival, bestArrival);
     }
   }
-  return Math.ceil(maxArrival + 4);
+
+  return {
+    owners,
+    arrivals,
+    imageData,
+    finishTime: Math.ceil(maxArrival + 4),
+  };
+}
+
+function drawWavefrontField(ctx, field, time, highlightedSiteIndex) {
+  if (!field?.imageData || !field.owners || !field.arrivals) return;
+  const hasHighlight = highlightedSiteIndex != null;
+  const pixels = field.imageData.data;
+
+  for (let index = 0; index < field.owners.length; index++) {
+    const offset = index * 4;
+    const owner = field.owners[index];
+    const arrival = field.arrivals[index];
+    if (owner === -1 || arrival > time) {
+      pixels[offset] = 0;
+      pixels[offset + 1] = 0;
+      pixels[offset + 2] = 0;
+      pixels[offset + 3] = 0;
+      continue;
+    }
+
+    const rgb = SITE_RGB[owner % SITE_RGB.length];
+    const freshness = Math.max(0, Math.min(1, 1 - (time - arrival) / 80));
+    const highlightBoost = hasHighlight && owner === highlightedSiteIndex ? 0.12 : 0;
+    const dim = hasHighlight && owner !== highlightedSiteIndex ? 0.45 : 1;
+    const alpha = (0.16 + freshness * 0.1 + highlightBoost) * dim;
+    pixels[offset] = rgb.r;
+    pixels[offset + 1] = rgb.g;
+    pixels[offset + 2] = rgb.b;
+    pixels[offset + 3] = Math.round(alpha * 255);
+  }
+
+  const canvas = getScratchCanvas();
+  const scratchCtx = canvas.getContext("2d");
+  scratchCtx.putImageData(field.imageData, 0, 0);
+  ctx.drawImage(canvas, 0, 0);
 }
 
 function unitBallPoint(theta, radius, p) {
@@ -104,7 +191,7 @@ function nearestSiteIndex(point, sites, maxDistance = 18) {
   return best;
 }
 
-function drawWavefront(ctx, sites, controls, p, time, highlightedSiteIndex = null) {
+function drawWavefront(ctx, sites, controls, p, time, highlightedSiteIndex = null, field = null) {
   const renderScale = ctx.canvas.width / CANVAS_WIDTH;
   const hasHighlight = highlightedSiteIndex != null;
   ctx.save();
@@ -123,20 +210,7 @@ function drawWavefront(ctx, sites, controls, p, time, highlightedSiteIndex = nul
   }
 
   if (sites.length) {
-    for (let x = 0; x < CANVAS_WIDTH; x += SAMPLE_SIZE) {
-      for (let y = 0; y < CANVAS_HEIGHT; y += SAMPLE_SIZE) {
-        const point = { x: x + SAMPLE_SIZE / 2, y: y + SAMPLE_SIZE / 2 };
-        const { owner, arrival: bestArrival } = ownerAt(point, sites, controls, p);
-        if (owner === -1 || bestArrival > time) continue;
-        const rgb = hexToRgb(colorForSite(owner));
-        const freshness = Math.max(0, Math.min(1, 1 - (time - bestArrival) / 80));
-        const highlightBoost = hasHighlight && owner === highlightedSiteIndex ? 0.12 : 0;
-        const dim = hasHighlight && owner !== highlightedSiteIndex ? 0.45 : 1;
-        const alpha = (0.16 + freshness * 0.1 + highlightBoost) * dim;
-        ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})`;
-        ctx.fillRect(x, y, SAMPLE_SIZE, SAMPLE_SIZE);
-      }
-    }
+    drawWavefrontField(ctx, field, time, highlightedSiteIndex);
 
     for (let i = 0; i < sites.length; i++) {
       const site = sites[i];
@@ -154,7 +228,7 @@ function drawWavefront(ctx, sites, controls, p, time, highlightedSiteIndex = nul
         const px = site.x + point.x;
         const py = site.y + point.y;
         const inCanvas = px >= 0 && px <= CANVAS_WIDTH && py >= 0 && py <= CANVAS_HEIGHT;
-        const { owner } = ownerAt({ x: px, y: py }, sites, controls, p);
+        const { owner } = ownerAtXY(px, py, sites, controls, p);
         const visible = inCanvas && owner === i;
         if (visible && !drawing) {
           ctx.beginPath();
@@ -226,10 +300,8 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   const renderBufferHeight = Math.round(CANVAS_HEIGHT * renderScale);
   const selectedMetric = METRICS.find(item => item.id === metric) ?? METRICS[1];
   const metricP = selectedMetric.p ?? customP;
-  const finishTime = useMemo(
-    () => computeFinishTime(sites, controls, metricP),
-    [sites, controls, metricP],
-  );
+  const wavefrontField = useMemo(() => buildWavefrontField(sites, controls, metricP), [sites, controls, metricP]);
+  const finishTime = wavefrontField.finishTime;
 
   useEffect(() => {
     setControls(current => normalizeControls(current, sites.length));
@@ -238,8 +310,8 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    drawWavefront(canvas.getContext("2d"), sites, controls, metricP, time, hoveredSiteIndex);
-  }, [sites, controls, metricP, time, hoveredSiteIndex]);
+    drawWavefront(canvas.getContext("2d"), sites, controls, metricP, time, hoveredSiteIndex, wavefrontField);
+  }, [sites, controls, metricP, time, hoveredSiteIndex, wavefrontField]);
 
   useEffect(() => {
     if (!playing) return;

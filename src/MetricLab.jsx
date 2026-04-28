@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, TARGET_RENDER_WIDTH } from "./appConstants.js";
 import { lpDistance } from "./geometry.js";
 
@@ -17,8 +17,7 @@ const METRICS = [
 const MIN_CUSTOM_P = -10;
 const MAX_CUSTOM_P = 16;
 const ZERO_P_GAP = 0.1;
-const COLOR_SAMPLE_SIZE = 2;
-const CONTOUR_SAMPLE_SIZE = 2;
+const COLOR_SAMPLE_SIZE = 1;
 
 function colorForSite(index) {
   return SITE_COLORS[index % SITE_COLORS.length];
@@ -34,11 +33,36 @@ function hexToRgb(hex) {
   };
 }
 
-function nearestSiteIndex(point, sites, p) {
+const SITE_RGB = SITE_COLORS.map(hexToRgb);
+const REGION_ALPHA = Math.round(0.14 * 255);
+const BOUNDARY_RGB = { r: 15, g: 23, b: 42 };
+const BOUNDARY_ALPHA = Math.round(0.28 * 255);
+
+let scratchCanvas = null;
+
+function getScratchCanvas() {
+  if (!scratchCanvas) scratchCanvas = document.createElement("canvas");
+  if (scratchCanvas.width !== CANVAS_WIDTH) scratchCanvas.width = CANVAS_WIDTH;
+  if (scratchCanvas.height !== CANVAS_HEIGHT) scratchCanvas.height = CANVAS_HEIGHT;
+  return scratchCanvas;
+}
+
+function metricDistanceValue(x, y, site, p) {
+  const dx = Math.abs(x - site.x);
+  const dy = Math.abs(y - site.y);
+  if (p === 2) return dx * dx + dy * dy;
+  if (p === 1) return dx + dy;
+  if (p === Infinity) return Math.max(dx, dy);
+  if (Math.abs(p) < 1e-6) return Math.max(dx, dy);
+  if (p < 0) return (dx ** p + dy ** p) ** (1 / p);
+  return dx ** p + dy ** p;
+}
+
+function nearestSiteIndexAt(x, y, sites, p) {
   let best = -1;
   let bestDistance = Infinity;
   for (let i = 0; i < sites.length; i++) {
-    const d = lpDistance(point, sites[i], p);
+    const d = metricDistanceValue(x, y, sites[i], p);
     if (d < bestDistance) {
       best = i;
       bestDistance = d;
@@ -47,69 +71,51 @@ function nearestSiteIndex(point, sites, p) {
   return best;
 }
 
-function interpolateZero(a, b) {
-  const denom = Math.abs(a.value) + Math.abs(b.value);
-  const t = denom < 1e-9 ? 0.5 : Math.abs(a.value) / denom;
-  return {
-    x: a.x + (b.x - a.x) * t,
-    y: a.y + (b.y - a.y) * t,
-  };
-}
+function buildMetricLayer(sites, p) {
+  if (!sites.length) return null;
+  const imageData = new ImageData(CANVAS_WIDTH, CANVAS_HEIGHT);
+  const pixels = imageData.data;
+  const owners = new Uint16Array(CANVAS_WIDTH * CANVAS_HEIGHT);
 
-function signedDistanceDifference(point, siteA, siteB, p) {
-  return lpDistance(point, siteA, p) - lpDistance(point, siteB, p);
-}
+  for (let y = 0; y < CANVAS_HEIGHT; y += COLOR_SAMPLE_SIZE) {
+    const sampleY = y + COLOR_SAMPLE_SIZE / 2;
+    for (let x = 0; x < CANVAS_WIDTH; x += COLOR_SAMPLE_SIZE) {
+      const sampleX = x + COLOR_SAMPLE_SIZE / 2;
+      const owner = nearestSiteIndexAt(sampleX, sampleY, sites, p);
+      const ownerOffset = y * CANVAS_WIDTH + x;
+      owners[ownerOffset] = owner;
 
-function drawSampledMetricContours(ctx, sites, p) {
-  if (sites.length < 2) return;
-  const step = CONTOUR_SAMPLE_SIZE;
-  ctx.save();
-  ctx.strokeStyle = "rgba(15,23,42,0.28)";
-  ctx.lineWidth = 1.2;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
-  for (let i = 0; i < sites.length; i++) {
-    for (let j = i + 1; j < sites.length; j++) {
-      ctx.beginPath();
-      for (let x = 0; x < CANVAS_WIDTH; x += step) {
-        for (let y = 0; y < CANVAS_HEIGHT; y += step) {
-          const corners = [
-            { x, y },
-            { x: Math.min(CANVAS_WIDTH, x + step), y },
-            { x: Math.min(CANVAS_WIDTH, x + step), y: Math.min(CANVAS_HEIGHT, y + step) },
-            { x, y: Math.min(CANVAS_HEIGHT, y + step) },
-          ].map(point => ({
-            ...point,
-            value: signedDistanceDifference(point, sites[i], sites[j], p),
-          }));
-
-          const intersections = [];
-          for (let k = 0; k < 4; k++) {
-            const a = corners[k];
-            const b = corners[(k + 1) % 4];
-            if (!Number.isFinite(a.value) || !Number.isFinite(b.value)) continue;
-            if (a.value === 0) intersections.push({ x: a.x, y: a.y });
-            if (a.value * b.value < 0) intersections.push(interpolateZero(a, b));
-          }
-          if (intersections.length < 2) continue;
-
-          const mid = {
-            x: (intersections[0].x + intersections[1].x) / 2,
-            y: (intersections[0].y + intersections[1].y) / 2,
-          };
-          const nearest = nearestSiteIndex(mid, sites, p);
-          if (nearest !== i && nearest !== j) continue;
-
-          ctx.moveTo(intersections[0].x, intersections[0].y);
-          ctx.lineTo(intersections[1].x, intersections[1].y);
-        }
-      }
-      ctx.stroke();
+      const rgb = SITE_RGB[owner % SITE_RGB.length];
+      const offset = ownerOffset * 4;
+      pixels[offset] = rgb.r;
+      pixels[offset + 1] = rgb.g;
+      pixels[offset + 2] = rgb.b;
+      pixels[offset + 3] = REGION_ALPHA;
     }
   }
 
-  ctx.restore();
+  if (p !== 2) {
+    for (let y = 0; y < CANVAS_HEIGHT - 1; y++) {
+      for (let x = 0; x < CANVAS_WIDTH - 1; x++) {
+        const index = y * CANVAS_WIDTH + x;
+        if (owners[index] === owners[index + 1] && owners[index] === owners[index + CANVAS_WIDTH]) continue;
+        const offset = index * 4;
+        pixels[offset] = BOUNDARY_RGB.r;
+        pixels[offset + 1] = BOUNDARY_RGB.g;
+        pixels[offset + 2] = BOUNDARY_RGB.b;
+        pixels[offset + 3] = BOUNDARY_ALPHA;
+      }
+    }
+  }
+
+  return imageData;
+}
+
+function drawImageDataLayer(ctx, imageData) {
+  const canvas = getScratchCanvas();
+  const scratchCtx = canvas.getContext("2d");
+  scratchCtx.putImageData(imageData, 0, 0);
+  ctx.drawImage(canvas, 0, 0);
 }
 
 function clipPolygonAgainstEuclideanBisector(polygon, site, other) {
@@ -232,7 +238,7 @@ function formatP(value) {
   return Number.isInteger(value) ? `${value}` : value.toFixed(1);
 }
 
-function drawMetricDiagram(ctx, sites, metricP) {
+function drawMetricDiagram(ctx, sites, metricP, metricLayer) {
   const renderScale = ctx.canvas.width / CANVAS_WIDTH;
   ctx.save();
   ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
@@ -250,18 +256,9 @@ function drawMetricDiagram(ctx, sites, metricP) {
   }
 
   if (sites.length) {
-    const cellSize = COLOR_SAMPLE_SIZE;
-    for (let x = 0; x < CANVAS_WIDTH; x += cellSize) {
-      for (let y = 0; y < CANVAS_HEIGHT; y += cellSize) {
-        const index = nearestSiteIndex({ x: x + cellSize / 2, y: y + cellSize / 2 }, sites, metricP);
-        const rgb = hexToRgb(colorForSite(index));
-        ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.14)`;
-        ctx.fillRect(x, y, cellSize, cellSize);
-      }
-    }
+    if (metricLayer) drawImageDataLayer(ctx, metricLayer);
 
     if (metricP === 2) drawExactEuclideanEdges(ctx, sites);
-    else drawSampledMetricContours(ctx, sites, metricP);
   }
 
   for (let i = 0; i < sites.length; i++) {
@@ -305,6 +302,7 @@ export default function MetricLab({ sites: controlledSites, setSites: setControl
   const renderBufferHeight = Math.round(CANVAS_HEIGHT * renderScale);
   const selectedMetric = METRICS.find(item => item.id === metric) ?? METRICS[1];
   const metricP = selectedMetric.p ?? customP;
+  const metricLayer = useMemo(() => buildMetricLayer(sites, metricP), [sites, metricP]);
 
   const commitCustomP = useCallback(value => {
     const parsed = Number(value);
@@ -327,8 +325,8 @@ export default function MetricLab({ sites: controlledSites, setSites: setControl
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    drawMetricDiagram(canvas.getContext("2d"), sites, metricP);
-  }, [sites, metricP]);
+    drawMetricDiagram(canvas.getContext("2d"), sites, metricP, metricLayer);
+  }, [sites, metricP, metricLayer]);
 
   const canvasPoint = useCallback(event => {
     const rect = canvasRef.current.getBoundingClientRect();
