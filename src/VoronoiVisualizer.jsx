@@ -9,6 +9,8 @@ import {
 } from "./appConstants.js";
 import { clamp, distance, nearlySamePoint, roundCoord, samePoint } from "./geometry.js";
 
+const ANIMATION_EDGE_BORDER = 4;
+
 /*
  * ═══════════════════════════════════════════════════════════════════════════
  * VORONOI DIAGRAM — Fortune's Algorithm Visualizer
@@ -706,32 +708,40 @@ class FortuneAlgo {
 
   getEdgesForRender(renderSweepX = this.sweepX, suppressAnimationStubs = false) {
     const bound = Math.max(this.W, this.H) * 2;
-    const rawEdges = this.edges
-      .filter(e => {
-        if (!e.end) return false;
-        if (e.left?.id == null || e.right?.id == null) return false;
-        if (Math.abs(e.start.x) > bound || Math.abs(e.start.y) > bound) return false;
-        if (Math.abs(e.end.x) > bound || Math.abs(e.end.y) > bound) {
-          return this._clipTest(e.start.x, e.start.y, e.end.x, e.end.y, -50, -50, this.W+50, this.H+50);
-        }
-        return true;
-      })
-      .map(e => {
-        const siteAId = Math.min(e.left.id, e.right.id);
-        const siteBId = Math.max(e.left.id, e.right.id);
-        return {
-          id: `edge-${e.debugId}`,
-          sourceIds: [e.debugId],
-          siteAId,
-          siteBId,
-          leftId: siteAId,
-          rightId: siteBId,
-          x1: e.start.x,
-          y1: e.start.y,
-          x2: e.end.x,
-          y2: e.end.y,
-        };
+    const rawEdges = [];
+    for (const e of this.edges) {
+      if (e.left?.id == null || e.right?.id == null) continue;
+      if (Math.abs(e.start.x) > bound || Math.abs(e.start.y) > bound) continue;
+
+      let end = e.end;
+      if (!end) {
+        const tip = this._growingTip(e, renderSweepX);
+        if (!tip || !this._isPastAnimationBorder(tip)) continue;
+        if (!this._clipTest(
+          e.start.x, e.start.y, tip.x, tip.y,
+          -ANIMATION_EDGE_BORDER, -ANIMATION_EDGE_BORDER,
+          this.W + ANIMATION_EDGE_BORDER, this.H + ANIMATION_EDGE_BORDER,
+        )) continue;
+        end = tip;
+      } else if (Math.abs(end.x) > bound || Math.abs(end.y) > bound) {
+        if (!this._clipTest(e.start.x, e.start.y, end.x, end.y, -50, -50, this.W+50, this.H+50)) continue;
+      }
+
+      const siteAId = Math.min(e.left.id, e.right.id);
+      const siteBId = Math.max(e.left.id, e.right.id);
+      rawEdges.push({
+        id: `edge-${e.debugId}`,
+        sourceIds: [e.debugId],
+        siteAId,
+        siteBId,
+        leftId: siteAId,
+        rightId: siteBId,
+        x1: e.start.x,
+        y1: e.start.y,
+        x2: end.x,
+        y2: end.y,
       });
+    }
 
     const filteredEdges = suppressAnimationStubs
       ? this._suppressAnimationStubEdges(rawEdges, renderSweepX)
@@ -747,6 +757,19 @@ class FortuneAlgo {
 
   getClippedEdges() {
     return buildCanvasEdgesFromDCEL(buildDerivedDCEL(this.sites, this.W, this.H));
+  }
+
+  _growingTip(edge, renderSweepX) {
+    if (!edge.topSite || !edge.botSite) return null;
+    if (edge.topSite.x > renderSweepX || edge.botSite.x > renderSweepX) return null;
+    const y = breakpointY(edge.topSite, edge.botSite, renderSweepX);
+    const x = parabolaX(edge.topSite, renderSweepX, y);
+    if (!isFinite(x) || !isFinite(y)) return null;
+    return { x, y };
+  }
+
+  _isPastAnimationBorder(point, border = ANIMATION_EDGE_BORDER) {
+    return point.x < -border || point.x > this.W + border || point.y < -border || point.y > this.H + border;
   }
 
   _clipTest(x1,y1,x2,y2,xn,yn,xx,yx) {
@@ -768,14 +791,11 @@ class FortuneAlgo {
     const growingByPair = new Map();
     for (const edge of this.edges) {
       if (edge.end) continue;
-      if (!edge.topSite || !edge.botSite) continue;
-      if (edge.topSite.x > renderSweepX || edge.botSite.x > renderSweepX) continue;
-      const by = breakpointY(edge.topSite, edge.botSite, renderSweepX);
-      const bx = parabolaX(edge.topSite, renderSweepX, by);
-      if (!isFinite(bx) || !isFinite(by)) continue;
+      const tip = this._growingTip(edge, renderSweepX);
+      if (!tip || this._isPastAnimationBorder(tip)) continue;
       const pair = `${Math.min(edge.left.id, edge.right.id)}-${Math.max(edge.left.id, edge.right.id)}`;
       const group = growingByPair.get(pair);
-      const snapshot = { start: edge.start, end: { x: bx, y: by } };
+      const snapshot = { start: edge.start, end: tip };
       if (group) group.push(snapshot);
       else growingByPair.set(pair, [snapshot]);
     }
@@ -833,17 +853,17 @@ class FortuneAlgo {
     const results = [];
     for (const e of this.edges) {
       if (e.end) continue;
-      if (!e.topSite || !e.botSite) continue;
-      // Both sites must be behind the sweep
-      if (e.topSite.x > renderSweepX || e.botSite.x > renderSweepX) continue;
-      const by = breakpointY(e.topSite, e.botSite, renderSweepX);
-      const bx = parabolaX(e.topSite, renderSweepX, by);
-      if (!isFinite(bx) || !isFinite(by)) continue;
-      if (Math.abs(bx) > 5000 || Math.abs(by) > 5000) continue;
-      if (!this._clipTest(e.start.x, e.start.y, bx, by, -60, -60, this.W+60, this.H+60)) continue;
+      const tip = this._growingTip(e, renderSweepX);
+      if (!tip || this._isPastAnimationBorder(tip)) continue;
+      if (Math.abs(tip.x) > 5000 || Math.abs(tip.y) > 5000) continue;
+      if (!this._clipTest(
+        e.start.x, e.start.y, tip.x, tip.y,
+        -ANIMATION_EDGE_BORDER, -ANIMATION_EDGE_BORDER,
+        this.W + ANIMATION_EDGE_BORDER, this.H + ANIMATION_EDGE_BORDER,
+      )) continue;
       // Also reject if the start point is way outside bounds
       if (Math.abs(e.start.x) > 5000 || Math.abs(e.start.y) > 5000) continue;
-      results.push({ x1:e.start.x, y1:e.start.y, x2:bx, y2:by });
+      results.push({ x1:e.start.x, y1:e.start.y, x2:tip.x, y2:tip.y });
     }
     return results;
   }
