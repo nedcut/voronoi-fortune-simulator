@@ -14,7 +14,7 @@ const METRICS = [
   { id: "custom", label: "Lp", p: null },
 ];
 
-const SAMPLE_SIZE = 4;
+const SAMPLE_SIZE = 2;
 const DEFAULT_START_RADIUS = 0;
 const DEFAULT_SPEED = 1;
 const MIN_FINISH_TIME = 80;

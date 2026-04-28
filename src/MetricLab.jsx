@@ -17,8 +17,8 @@ const METRICS = [
 const MIN_CUSTOM_P = -10;
 const MAX_CUSTOM_P = 16;
 const ZERO_P_GAP = 0.1;
-const COLOR_SAMPLE_SIZE = 3;
-const CONTOUR_SAMPLE_SIZE = 4;
+const COLOR_SAMPLE_SIZE = 2;
+const CONTOUR_SAMPLE_SIZE = 2;
 
 function colorForSite(index) {
   return SITE_COLORS[index % SITE_COLORS.length];
