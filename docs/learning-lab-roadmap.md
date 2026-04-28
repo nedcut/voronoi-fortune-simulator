@@ -27,6 +27,7 @@ This checklist tracks the path from the current Fortune sweep visualizer to a br
   - [x] Experimental negative p values.
 - [ ] Additively weighted Voronoi diagrams.
 - [ ] Multiplicatively weighted Voronoi diagrams.
+- [x] Wavefront growth view with additive starts and multiplicative speeds.
 - [ ] Power diagrams / Laguerre diagrams.
 - [ ] Furthest-site Voronoi diagrams.
 - [ ] Order-k / k-nearest Voronoi diagrams.
