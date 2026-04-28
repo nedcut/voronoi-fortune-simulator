@@ -17,6 +17,8 @@ const METRICS = [
 const MIN_CUSTOM_P = -10;
 const MAX_CUSTOM_P = 16;
 const ZERO_P_GAP = 0.1;
+const COLOR_SAMPLE_SIZE = 3;
+const CONTOUR_SAMPLE_SIZE = 4;
 
 function colorForSite(index) {
   return SITE_COLORS[index % SITE_COLORS.length];
@@ -43,6 +45,135 @@ function nearestSiteIndex(point, sites, p) {
     }
   }
   return best;
+}
+
+function interpolateZero(a, b) {
+  const denom = Math.abs(a.value) + Math.abs(b.value);
+  const t = denom < 1e-9 ? 0.5 : Math.abs(a.value) / denom;
+  return {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+  };
+}
+
+function signedDistanceDifference(point, siteA, siteB, p) {
+  return lpDistance(point, siteA, p) - lpDistance(point, siteB, p);
+}
+
+function drawSampledMetricContours(ctx, sites, p) {
+  if (sites.length < 2) return;
+  const step = CONTOUR_SAMPLE_SIZE;
+  ctx.save();
+  ctx.strokeStyle = "rgba(15,23,42,0.28)";
+  ctx.lineWidth = 1.2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  for (let i = 0; i < sites.length; i++) {
+    for (let j = i + 1; j < sites.length; j++) {
+      ctx.beginPath();
+      for (let x = 0; x < CANVAS_WIDTH; x += step) {
+        for (let y = 0; y < CANVAS_HEIGHT; y += step) {
+          const corners = [
+            { x, y },
+            { x: Math.min(CANVAS_WIDTH, x + step), y },
+            { x: Math.min(CANVAS_WIDTH, x + step), y: Math.min(CANVAS_HEIGHT, y + step) },
+            { x, y: Math.min(CANVAS_HEIGHT, y + step) },
+          ].map(point => ({
+            ...point,
+            value: signedDistanceDifference(point, sites[i], sites[j], p),
+          }));
+
+          const intersections = [];
+          for (let k = 0; k < 4; k++) {
+            const a = corners[k];
+            const b = corners[(k + 1) % 4];
+            if (!Number.isFinite(a.value) || !Number.isFinite(b.value)) continue;
+            if (a.value === 0) intersections.push({ x: a.x, y: a.y });
+            if (a.value * b.value < 0) intersections.push(interpolateZero(a, b));
+          }
+          if (intersections.length < 2) continue;
+
+          const mid = {
+            x: (intersections[0].x + intersections[1].x) / 2,
+            y: (intersections[0].y + intersections[1].y) / 2,
+          };
+          const nearest = nearestSiteIndex(mid, sites, p);
+          if (nearest !== i && nearest !== j) continue;
+
+          ctx.moveTo(intersections[0].x, intersections[0].y);
+          ctx.lineTo(intersections[1].x, intersections[1].y);
+        }
+      }
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
+function clipPolygonAgainstEuclideanBisector(polygon, site, other) {
+  if (!polygon.length) return [];
+  const a = other.x - site.x;
+  const b = other.y - site.y;
+  const c = (other.x * other.x + other.y * other.y - site.x * site.x - site.y * site.y) / 2;
+  const inside = point => a * point.x + b * point.y <= c + 1e-7;
+  const intersect = (p1, p2) => {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const denom = a * dx + b * dy;
+    if (Math.abs(denom) < 1e-9) return { x: p2.x, y: p2.y };
+    const t = Math.max(0, Math.min(1, (c - a * p1.x - b * p1.y) / denom));
+    return { x: p1.x + dx * t, y: p1.y + dy * t };
+  };
+
+  const clipped = [];
+  for (let i = 0; i < polygon.length; i++) {
+    const current = polygon[i];
+    const next = polygon[(i + 1) % polygon.length];
+    const currentInside = inside(current);
+    const nextInside = inside(next);
+    if (currentInside && nextInside) {
+      clipped.push(next);
+    } else if (currentInside && !nextInside) {
+      clipped.push(intersect(current, next));
+    } else if (!currentInside && nextInside) {
+      clipped.push(intersect(current, next));
+      clipped.push(next);
+    }
+  }
+  return clipped;
+}
+
+function drawExactEuclideanEdges(ctx, sites) {
+  if (sites.length < 2) return;
+  const bounds = [
+    { x: 0, y: 0 },
+    { x: CANVAS_WIDTH, y: 0 },
+    { x: CANVAS_WIDTH, y: CANVAS_HEIGHT },
+    { x: 0, y: CANVAS_HEIGHT },
+  ];
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(15,23,42,0.36)";
+  ctx.lineWidth = 1.4;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const site of sites) {
+    let polygon = bounds.map(point => ({ ...point }));
+    for (const other of sites) {
+      if (other === site) continue;
+      polygon = clipPolygonAgainstEuclideanBisector(polygon, site, other);
+      if (polygon.length < 3) break;
+    }
+    if (polygon.length < 3) continue;
+    ctx.beginPath();
+    ctx.moveTo(polygon[0].x, polygon[0].y);
+    for (let i = 1; i < polygon.length; i++) ctx.lineTo(polygon[i].x, polygon[i].y);
+    ctx.closePath();
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawUnitBall(ctx, p, x, y, size) {
@@ -119,7 +250,7 @@ function drawMetricDiagram(ctx, sites, metricP) {
   }
 
   if (sites.length) {
-    const cellSize = 5;
+    const cellSize = COLOR_SAMPLE_SIZE;
     for (let x = 0; x < CANVAS_WIDTH; x += cellSize) {
       for (let y = 0; y < CANVAS_HEIGHT; y += cellSize) {
         const index = nearestSiteIndex({ x: x + cellSize / 2, y: y + cellSize / 2 }, sites, metricP);
@@ -129,27 +260,8 @@ function drawMetricDiagram(ctx, sites, metricP) {
       }
     }
 
-    ctx.strokeStyle = "rgba(15,23,42,0.22)";
-    ctx.lineWidth = 1;
-    for (let x = 0; x < CANVAS_WIDTH - cellSize; x += cellSize) {
-      for (let y = 0; y < CANVAS_HEIGHT - cellSize; y += cellSize) {
-        const here = nearestSiteIndex({ x, y }, sites, metricP);
-        const right = nearestSiteIndex({ x: x + cellSize, y }, sites, metricP);
-        const down = nearestSiteIndex({ x, y: y + cellSize }, sites, metricP);
-        if (here !== right) {
-          ctx.beginPath();
-          ctx.moveTo(x + cellSize, y);
-          ctx.lineTo(x + cellSize, y + cellSize);
-          ctx.stroke();
-        }
-        if (here !== down) {
-          ctx.beginPath();
-          ctx.moveTo(x, y + cellSize);
-          ctx.lineTo(x + cellSize, y + cellSize);
-          ctx.stroke();
-        }
-      }
-    }
+    if (metricP === 2) drawExactEuclideanEdges(ctx, sites);
+    else drawSampledMetricContours(ctx, sites, metricP);
   }
 
   for (let i = 0; i < sites.length; i++) {
@@ -342,7 +454,7 @@ export default function MetricLab({ sites: controlledSites, setSites: setControl
         <div style={{marginTop:16,maxWidth:CANVAS_WIDTH,width:"100%",display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:10,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>
           {[
             ["Metric", [["Distance", selectedMetric.label === "Lp" ? `(|dx|^p + |dy|^p)^(1/p)` : selectedMetric.label], ["p", metricP === Infinity ? "infinity" : `${metricP}`], ["Kind", metricP < 1 ? "experimental" : "metric"], ["Sites", `${sites.length}`]]],
-            ["Reading Cells", [["Color", "nearest site"], ["Dark seams", "sampled boundaries"], ["Inset", "unit ball"]]],
+            ["Reading Cells", [["Color", "nearest site"], ["Edges", metricP === 2 ? "exact Euclidean" : "smooth sampled contours"], ["Inset", "unit ball"]]],
             ["Next Step", [["Compare", "same sites, two metrics"], ["Exact edges", "Euclidean mode"], ["Lessons", "distance and bisectors"]]],
           ].map(([title, rows]) => (
             <div key={title} style={{background:"#ffffff",borderRadius:10,padding:"12px 16px",border:"1px solid #cbd5e1"}}>
