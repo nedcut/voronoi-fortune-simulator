@@ -287,13 +287,28 @@ function drawMetricDiagram(ctx, sites, metricP, metricLayer) {
   ctx.restore();
 }
 
-export default function MetricLab({ sites: controlledSites, setSites: setControlledSites } = {}) {
+export default function MetricLab({
+  sites: controlledSites,
+  setSites: setControlledSites,
+  metric: controlledMetric,
+  setMetric: setControlledMetric,
+  customP: controlledCustomP,
+  setCustomP: setControlledCustomP,
+  customPInput: controlledCustomPInput,
+  setCustomPInput: setControlledCustomPInput,
+} = {}) {
   const [localSites, setLocalSites] = useState([]);
   const sites = controlledSites ?? localSites;
   const setSites = setControlledSites ?? setLocalSites;
-  const [metric, setMetric] = useState("l2");
-  const [customP, setCustomP] = useState(3);
-  const [customPInput, setCustomPInput] = useState("3");
+  const [localMetric, setLocalMetric] = useState("l2");
+  const [localCustomP, setLocalCustomP] = useState(3);
+  const [localCustomPInput, setLocalCustomPInput] = useState("3");
+  const metric = controlledMetric ?? localMetric;
+  const setMetric = setControlledMetric ?? setLocalMetric;
+  const customP = controlledCustomP ?? localCustomP;
+  const setCustomP = setControlledCustomP ?? setLocalCustomP;
+  const customPInput = controlledCustomPInput ?? localCustomPInput;
+  const setCustomPInput = setControlledCustomPInput ?? setLocalCustomPInput;
   const canvasRef = useRef(null);
   const dragging = useRef(null);
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
@@ -395,10 +410,10 @@ export default function MetricLab({ sites: controlledSites, setSites: setControl
     if (dragging.current) setTimeout(() => { dragging.current = null; }, 0);
   }, []);
 
-  const addRandom = useCallback(() => {
+  const addRandom = useCallback(count => {
     setSites(current => {
       const next = [...current];
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < count; i++) {
         next.push({
           x: 50 + Math.random() * (CANVAS_WIDTH - 100),
           y: 50 + Math.random() * (CANVAS_HEIGHT - 100),
@@ -485,7 +500,9 @@ export default function MetricLab({ sites: controlledSites, setSites: setControl
             <span style={{fontSize:10,color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>p</span>
           </div>
           <div style={{display:"flex",gap:4,background:"#ffffff",borderRadius:10,padding:4,border:"1px solid #cbd5e1",alignItems:"center"}}>
-            <button onClick={addRandom} style={buttonStyle(false)}>+5</button>
+            <button onClick={() => addRandom(5)} style={buttonStyle(false)}>+5</button>
+            <button onClick={() => addRandom(10)} style={buttonStyle(false)}>+10</button>
+            <button onClick={() => addRandom(15)} style={buttonStyle(false)}>+15</button>
             <button onClick={() => setSites([])} style={{...buttonStyle(false),color:"#dc2626"}}>Clear</button>
           </div>
         </div>

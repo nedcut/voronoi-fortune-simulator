@@ -10,6 +10,15 @@ import {
 import { clamp, distance, nearlySamePoint, roundCoord, samePoint } from "./geometry.js";
 
 const ANIMATION_EDGE_BORDER = 4;
+const METRICS = [
+  { id: "l1", label: "L1", p: 1 },
+  { id: "l2", label: "L2", p: 2 },
+  { id: "linf", label: "L∞", p: Infinity },
+  { id: "custom", label: "Lp", p: null },
+];
+const MIN_CUSTOM_P = -10;
+const MAX_CUSTOM_P = 16;
+const ZERO_P_GAP = 0.1;
 
 /*
  * ═══════════════════════════════════════════════════════════════════════════
@@ -882,6 +891,16 @@ function appendSites(existing, candidates, minDistance = 8) {
     if (!tooClose) next.push(candidate);
   }
   return next;
+}
+
+function normalizeCustomP(value) {
+  if (value === Infinity) return value;
+  if (Math.abs(value) >= ZERO_P_GAP) return value;
+  return value < 0 ? -ZERO_P_GAP : ZERO_P_GAP;
+}
+
+function formatP(value) {
+  return Number.isInteger(value) ? `${value}` : value.toFixed(1);
 }
 
 function completeAlgorithm(algo, W) {
@@ -2399,7 +2418,16 @@ function StructuresSidebar({
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
-export default function VoronoiVisualizer({ sites: controlledSites, setSites: setControlledSites } = {}) {
+export default function VoronoiVisualizer({
+  sites: controlledSites,
+  setSites: setControlledSites,
+  metric: controlledMetric,
+  setMetric: setControlledMetric,
+  customP: controlledCustomP,
+  setCustomP: setControlledCustomP,
+  customPInput: controlledCustomPInput,
+  setCustomPInput: setControlledCustomPInput,
+} = {}) {
   const [localSites, setLocalSites] = useState([]);
   const sites = controlledSites ?? localSites;
   const setSites = setControlledSites ?? setLocalSites;
@@ -2407,6 +2435,15 @@ export default function VoronoiVisualizer({ sites: controlledSites, setSites: se
   const [playing, setPlaying] = useState(false);
   const [hud, setHud] = useState(() => makeHudState(null, 0));
   const [speed, setSpeed] = useState(30);
+  const [localMetric, setLocalMetric] = useState("l2");
+  const [localCustomP, setLocalCustomP] = useState(3);
+  const [localCustomPInput, setLocalCustomPInput] = useState("3");
+  const metric = controlledMetric ?? localMetric;
+  const setMetric = setControlledMetric ?? setLocalMetric;
+  const customP = controlledCustomP ?? localCustomP;
+  const setCustomP = setControlledCustomP ?? setLocalCustomP;
+  const customPInput = controlledCustomPInput ?? localCustomPInput;
+  const setCustomPInput = setControlledCustomPInput ?? setLocalCustomPInput;
   const [showSweep, setShowSweep] = useState(true);
   const [showBeach, setShowBeach] = useState(true);
   const [showCircles, setShowCircles] = useState(true);
@@ -2785,6 +2822,9 @@ export default function VoronoiVisualizer({ sites: controlledSites, setSites: se
   },[]);
 
   const dpr=typeof window!=="undefined"?(window.devicePixelRatio||1):1;
+  const selectedMetric = METRICS.find(item => item.id === metric) ?? METRICS[1];
+  const metricP = selectedMetric.p ?? customP;
+  const metricLabel = selectedMetric.label === "Lp" ? `L${formatP(customP)}` : selectedMetric.label;
   const eventHistory = alg.current ? alg.current.getEventHistory() : [];
   const canStepToPreviousEvent = (mode === "animate" || mode === "done") &&
     !playing &&
@@ -2797,6 +2837,22 @@ export default function VoronoiVisualizer({ sites: controlledSites, setSites: se
     border:"1px solid "+(acc?theme.btnAccBorder:theme.btnBorder),borderRadius:7,padding:"6px 13px",cursor:"pointer",
     fontSize:13,fontFamily:"'DM Sans',sans-serif",fontWeight:acc?700:500,transition:"all 0.15s",
   });
+  const commitCustomP = useCallback(value => {
+    const parsed = Number(value);
+    const normalized = Number.isFinite(parsed)
+      ? normalizeCustomP(Math.min(MAX_CUSTOM_P, Math.max(MIN_CUSTOM_P, parsed)))
+      : customP;
+    setCustomP(normalized);
+    setCustomPInput(formatP(normalized));
+  }, [customP]);
+  const updateCustomP = useCallback(value => {
+    setMetric("custom");
+    setCustomPInput(value);
+    if (value === "" || value === "-" || value === "." || value === "-.") return;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    setCustomP(normalizeCustomP(Math.min(MAX_CUSTOM_P, Math.max(MIN_CUSTOM_P, parsed))));
+  }, []);
   const sidebarButtonLabel = showPanel ? "Hide Sidebar" : "Open Sidebar";
   const layoutMaxWidth = isDockedSidebar ? Math.max(1360, dockedSidebarWidth + 920) : 980;
   const stageMaxWidth = CANVAS_WIDTH;
@@ -2874,11 +2930,47 @@ export default function VoronoiVisualizer({ sites: controlledSites, setSites: se
               <span style={{fontSize:10,color:theme.textDimmer,fontFamily:"'JetBrains Mono',monospace"}}>{Math.round(pxPerSec(speed))}px/s</span>
             </div>
 
+            <div style={pS}>
+              {METRICS.map(item => (
+                <button key={item.id} onClick={() => setMetric(item.id)} style={bS(metric === item.id)}>
+                  {item.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{...pS,padding:"6px 14px",gap:8,opacity:metric === "custom" ? 1 : 0.55}}>
+              <input
+                type="range"
+                min={MIN_CUSTOM_P}
+                max={MAX_CUSTOM_P}
+                step={0.1}
+                value={customP}
+                onChange={event => {
+                  updateCustomP(event.target.value);
+                  setCustomPInput(formatP(Number(event.target.value)));
+                }}
+                disabled={metric !== "custom"}
+                style={{width:120,accentColor:theme.accent,cursor:metric === "custom" ? "pointer" : "default"}}
+              />
+              <input
+                type="number"
+                min={MIN_CUSTOM_P}
+                max={MAX_CUSTOM_P}
+                step={0.1}
+                value={customPInput}
+                onChange={event => updateCustomP(event.target.value)}
+                onBlur={event => commitCustomP(event.target.value)}
+                onFocus={() => setMetric("custom")}
+                style={{width:58,border:`1px solid ${theme.panelBorder}`,borderRadius:6,padding:"4px 6px",fontSize:11,color:theme.text,fontFamily:"'JetBrains Mono',monospace",background:theme.btnBg}}
+              />
+              <span style={{fontSize:10,color:theme.textDimmer,fontFamily:"'JetBrains Mono',monospace"}}>p</span>
+            </div>
+
             {mode==="place"&&(
               <div style={pS}>
                 <button onClick={()=>addR(5)} style={bS(false)}>+5</button>
+                <button onClick={()=>addR(10)} style={bS(false)}>+10</button>
                 <button onClick={()=>addR(15)} style={bS(false)}>+15</button>
-                <button onClick={()=>addR(30)} style={bS(false)}>+30</button>
                 <button onClick={clear} style={bS(false,true)}>Clear</button>
               </div>
             )}
@@ -2910,7 +3002,8 @@ export default function VoronoiVisualizer({ sites: controlledSites, setSites: se
           <div style={{marginTop:16,maxWidth:stageMaxWidth,width:"100%",display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:10,
             fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>
             {[
-              ["Algorithm",[["Type","Fortune's sweep"],["Direction","Left → Right"],["Complexity","O(n log n)"],["Beachline","Parabolic arcs"]]],
+              ["Algorithm",[["Type","Fortune's sweep"],["Direction","Left → Right"],["Complexity","O(n log n)"],["Sweep metric","Euclidean"]]],
+              ["Metric Context",[["Selected",metricLabel],["p",metricP === Infinity ? "infinity" : `${metricP}`],["Used by","Metric/Wavefront labs"],["Fortune edges","Euclidean"]]],
               ["Current State",[["Sites",`${sites.length}`],["Events processed",`${hud.stepCount??"—"}`],["Events queued",`${hud.queueLength??"—"}`],["Vertices found",`${hud.vertices??"—"}`]]],
               ["Legend",[["┃ blue","Sweep line (continuous)"],["~ colored","Beachline parabolas"],["◯ gray","Circle events → vertices"],["━ white","Voronoi cell edges"]]],
             ].map(([title,rows])=>(

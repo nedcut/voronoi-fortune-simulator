@@ -4,6 +4,9 @@ import { DEFAULT_DIAGRAM_MODE_ID, DIAGRAM_MODES } from "./diagramModes.js";
 export default function App() {
   const [activeModeId, setActiveModeId] = useState(DEFAULT_DIAGRAM_MODE_ID);
   const [sites, setSites] = useState([]);
+  const [metric, setMetric] = useState("l2");
+  const [customP, setCustomP] = useState(3);
+  const [customPInput, setCustomPInput] = useState("3");
   const activeMode = useMemo(
     () => DIAGRAM_MODES.find(mode => mode.id === activeModeId) ?? DIAGRAM_MODES[0],
     [activeModeId],
@@ -47,7 +50,16 @@ export default function App() {
           );
         })}
       </nav>
-      <ActiveComponent sites={sites} setSites={setSites} />
+      <ActiveComponent
+        sites={sites}
+        setSites={setSites}
+        metric={metric}
+        setMetric={setMetric}
+        customP={customP}
+        setCustomP={setCustomP}
+        customPInput={customPInput}
+        setCustomPInput={setCustomPInput}
+      />
     </div>
   );
 }

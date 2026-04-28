@@ -18,6 +18,9 @@ const SAMPLE_SIZE = 1;
 const DEFAULT_START_RADIUS = 0;
 const DEFAULT_SPEED = 1;
 const MIN_FINISH_TIME = 80;
+const MIN_CUSTOM_P = -10;
+const MAX_CUSTOM_P = 16;
+const ZERO_P_GAP = 0.1;
 
 function colorForSite(index) {
   return SITE_COLORS[index % SITE_COLORS.length];
@@ -46,6 +49,12 @@ function getScratchCanvas() {
 
 function formatNumber(value) {
   return Number.isInteger(value) ? `${value}` : value.toFixed(1);
+}
+
+function normalizeCustomP(value) {
+  if (value === Infinity) return value;
+  if (Math.abs(value) >= ZERO_P_GAP) return value;
+  return value < 0 ? -ZERO_P_GAP : ZERO_P_GAP;
 }
 
 function getSiteControl(controls, index) {
@@ -280,13 +289,29 @@ function drawWavefront(ctx, sites, controls, p, time, highlightedSiteIndex = nul
   ctx.restore();
 }
 
-export default function WavefrontLab({ sites: controlledSites, setSites: setControlledSites } = {}) {
+export default function WavefrontLab({
+  sites: controlledSites,
+  setSites: setControlledSites,
+  metric: controlledMetric,
+  setMetric: setControlledMetric,
+  customP: controlledCustomP,
+  setCustomP: setControlledCustomP,
+  customPInput: controlledCustomPInput,
+  setCustomPInput: setControlledCustomPInput,
+} = {}) {
   const [localSites, setLocalSites] = useState([]);
   const sites = controlledSites ?? localSites;
   const setSites = setControlledSites ?? setLocalSites;
   const [controls, setControls] = useState([]);
-  const [metric, setMetric] = useState("l2");
-  const [customP, setCustomP] = useState(3);
+  const [localMetric, setLocalMetric] = useState("l2");
+  const [localCustomP, setLocalCustomP] = useState(3);
+  const [localCustomPInput, setLocalCustomPInput] = useState("3");
+  const metric = controlledMetric ?? localMetric;
+  const setMetric = setControlledMetric ?? setLocalMetric;
+  const customP = controlledCustomP ?? localCustomP;
+  const setCustomP = setControlledCustomP ?? setLocalCustomP;
+  const customPInput = controlledCustomPInput ?? localCustomPInput;
+  const setCustomPInput = setControlledCustomPInput ?? setLocalCustomPInput;
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [hoveredSiteIndex, setHoveredSiteIndex] = useState(null);
@@ -302,6 +327,24 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   const metricP = selectedMetric.p ?? customP;
   const wavefrontField = useMemo(() => buildWavefrontField(sites, controls, metricP), [sites, controls, metricP]);
   const finishTime = wavefrontField.finishTime;
+
+  const commitCustomP = useCallback(value => {
+    const parsed = Number(value);
+    const normalized = Number.isFinite(parsed)
+      ? normalizeCustomP(Math.min(MAX_CUSTOM_P, Math.max(MIN_CUSTOM_P, parsed)))
+      : customP;
+    setCustomP(normalized);
+    setCustomPInput(formatNumber(normalized));
+  }, [customP]);
+
+  const updateCustomP = useCallback(value => {
+    setMetric("custom");
+    setCustomPInput(value);
+    if (value === "" || value === "-" || value === "." || value === "-.") return;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    setCustomP(normalizeCustomP(Math.min(MAX_CUSTOM_P, Math.max(MIN_CUSTOM_P, parsed))));
+  }, []);
 
   useEffect(() => {
     setControls(current => normalizeControls(current, sites.length));
@@ -339,6 +382,18 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   useEffect(() => {
     setTime(current => Math.min(current, finishTime));
   }, [finishTime]);
+
+  useEffect(() => {
+    const handler = event => {
+      if (event.target.tagName === "INPUT") return;
+      if (event.key !== " ") return;
+      event.preventDefault();
+      previousFrame.current = 0;
+      setPlaying(current => !current);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const canvasPoint = useCallback(event => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -412,6 +467,19 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
     if (dragging.current) setTimeout(() => { dragging.current = null; }, 0);
   }, []);
 
+  const addRandom = useCallback(count => {
+    setSites(current => {
+      const next = [...current];
+      for (let i = 0; i < count; i++) {
+        next.push({
+          x: 50 + Math.random() * (CANVAS_WIDTH - 100),
+          y: 50 + Math.random() * (CANVAS_HEIGHT - 100),
+        });
+      }
+      return next;
+    });
+  }, [setSites]);
+
   const updateControl = useCallback((siteIndex, key, value) => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return;
@@ -479,7 +547,7 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
 
         <div style={{marginTop:14,display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center",alignItems:"center"}}>
           <div style={{display:"flex",gap:4,background:"#ffffff",borderRadius:10,padding:4,border:"1px solid #cbd5e1",alignItems:"center"}}>
-            <button onClick={() => setPlaying(current => !current)} style={buttonStyle(playing)}>
+            <button onClick={() => { previousFrame.current = 0; setPlaying(current => !current); }} style={buttonStyle(playing)}>
               {playing ? "Pause" : "Play"}
             </button>
             <button onClick={() => { setPlaying(false); setTime(0); }} style={buttonStyle(false)}>Reset</button>
@@ -509,18 +577,35 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
           <div style={{display:"flex",gap:8,background:"#ffffff",borderRadius:10,padding:"6px 14px",border:"1px solid #cbd5e1",alignItems:"center",opacity:metric === "custom" ? 1 : 0.55}}>
             <input
               type="range"
-              min={0.2}
-              max={8}
+              min={MIN_CUSTOM_P}
+              max={MAX_CUSTOM_P}
               step={0.1}
               value={customP}
               onChange={event => {
-                setMetric("custom");
-                setCustomP(Number(event.target.value));
+                updateCustomP(event.target.value);
+                setCustomPInput(formatNumber(Number(event.target.value)));
               }}
               disabled={metric !== "custom"}
-              style={{width:100,accentColor:"#ca8a04",cursor:metric === "custom" ? "pointer" : "default"}}
+              style={{width:120,accentColor:"#ca8a04",cursor:metric === "custom" ? "pointer" : "default"}}
             />
-            <span style={{fontSize:10,color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>p={formatNumber(customP)}</span>
+            <input
+              type="number"
+              min={MIN_CUSTOM_P}
+              max={MAX_CUSTOM_P}
+              step={0.1}
+              value={customPInput}
+              onChange={event => updateCustomP(event.target.value)}
+              onBlur={event => commitCustomP(event.target.value)}
+              onFocus={() => setMetric("custom")}
+              style={{width:58,border:"1px solid #cbd5e1",borderRadius:6,padding:"4px 6px",fontSize:11,color:"#334155",fontFamily:"'JetBrains Mono',monospace"}}
+            />
+            <span style={{fontSize:10,color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>p</span>
+          </div>
+          <div style={{display:"flex",gap:4,background:"#ffffff",borderRadius:10,padding:4,border:"1px solid #cbd5e1",alignItems:"center"}}>
+            <button onClick={() => addRandom(5)} style={buttonStyle(false)}>+5</button>
+            <button onClick={() => addRandom(10)} style={buttonStyle(false)}>+10</button>
+            <button onClick={() => addRandom(15)} style={buttonStyle(false)}>+15</button>
+            <button onClick={() => { setPlaying(false); setTime(0); setHoveredSiteIndex(null); setSites([]); }} style={{...buttonStyle(false),color:"#dc2626"}}>Clear</button>
           </div>
         </div>
 
