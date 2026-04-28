@@ -3,6 +3,7 @@ import { DEFAULT_DIAGRAM_MODE_ID, DIAGRAM_MODES } from "./diagramModes.js";
 
 export default function App() {
   const [activeModeId, setActiveModeId] = useState(DEFAULT_DIAGRAM_MODE_ID);
+  const [sites, setSites] = useState([]);
   const activeMode = useMemo(
     () => DIAGRAM_MODES.find(mode => mode.id === activeModeId) ?? DIAGRAM_MODES[0],
     [activeModeId],
@@ -46,7 +47,7 @@ export default function App() {
           );
         })}
       </nav>
-      <ActiveComponent />
+      <ActiveComponent sites={sites} setSites={setSites} />
     </div>
   );
 }

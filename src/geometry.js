@@ -8,6 +8,7 @@ export function lpDistance(a, b, p = 2) {
   if (p === Infinity) return Math.max(dx, dy);
   if (p === 1) return dx + dy;
   if (p === 2) return Math.hypot(dx, dy);
+  if (Math.abs(p) < 1e-6) return Math.max(dx, dy);
   return (dx ** p + dy ** p) ** (1 / p);
 }
 

@@ -23,7 +23,8 @@ This checklist tracks the path from the current Fortune sweep visualizer to a br
   - [ ] L1 / Manhattan.
   - [ ] L2 / Euclidean.
   - [ ] L-infinity / Chebyshev.
-  - [ ] Configurable p value.
+  - [x] Configurable p value.
+  - [x] Experimental negative p values.
 - [ ] Additively weighted Voronoi diagrams.
 - [ ] Multiplicatively weighted Voronoi diagrams.
 - [ ] Power diagrams / Laguerre diagrams.
@@ -51,6 +52,11 @@ This checklist tracks the path from the current Fortune sweep visualizer to a br
   - [ ] incircle test.
   - [ ] degeneracy examples.
 - [ ] Minkowski unit-ball view for metric intuition.
+- [ ] 3D computational geometry extension.
+  - [ ] 3D Voronoi cells.
+  - [ ] 3D Delaunay tetrahedralization.
+  - [ ] 3D convex hulls.
+  - [ ] Three.js camera controls and slicing planes.
 - [ ] Complexity counters and operation traces.
 
 ## Learning Experience
@@ -92,4 +98,5 @@ This checklist tracks the path from the current Fortune sweep visualizer to a br
 - [x] Move canvas constants and shared distance functions out of the React component.
 - [x] Add a diagram mode registry with the current Fortune visualizer as the first mode.
 - [x] Add a Metric Lab mode behind the same app shell.
+- [x] Share point state between Fortune Sweep and Metric Lab.
 - [x] Verify with `bun run build`.

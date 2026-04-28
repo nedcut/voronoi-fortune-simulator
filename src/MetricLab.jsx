@@ -14,6 +14,10 @@ const METRICS = [
   { id: "custom", label: "Lp", p: null },
 ];
 
+const MIN_CUSTOM_P = -10;
+const MAX_CUSTOM_P = 16;
+const ZERO_P_GAP = 0.1;
+
 function colorForSite(index) {
   return SITE_COLORS[index % SITE_COLORS.length];
 }
@@ -43,6 +47,7 @@ function nearestSiteIndex(point, sites, p) {
 
 function drawUnitBall(ctx, p, x, y, size) {
   const radius = size / 2;
+  const safeP = normalizeCustomP(p);
   ctx.save();
   ctx.translate(x + radius, y + radius);
   ctx.strokeStyle = "rgba(15,23,42,0.35)";
@@ -55,16 +60,21 @@ function drawUnitBall(ctx, p, x, y, size) {
 
   ctx.strokeStyle = "#0f172a";
   ctx.lineWidth = 2;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-radius, -radius, size, size);
+  ctx.clip();
   ctx.beginPath();
   const steps = 160;
   for (let i = 0; i <= steps; i++) {
     const theta = (i / steps) * Math.PI * 2;
     const cos = Math.cos(theta);
     const sin = Math.sin(theta);
-    const denom = p === Infinity
+    const denom = safeP === Infinity
       ? Math.max(Math.abs(cos), Math.abs(sin))
-      : (Math.abs(cos) ** p + Math.abs(sin) ** p) ** (1 / p);
-    const r = radius * 0.72 / denom;
+      : (Math.abs(cos) ** safeP + Math.abs(sin) ** safeP) ** (1 / safeP);
+    const rawRadius = radius * 0.72 / denom;
+    const r = Number.isFinite(rawRadius) ? rawRadius : radius * 2;
     const px = cos * r;
     const py = sin * r;
     if (i === 0) ctx.moveTo(px, py);
@@ -72,12 +82,23 @@ function drawUnitBall(ctx, p, x, y, size) {
   }
   ctx.closePath();
   ctx.stroke();
+  ctx.restore();
 
   ctx.fillStyle = "#475569";
   ctx.font = "11px 'JetBrains Mono', monospace";
   ctx.textAlign = "center";
-  ctx.fillText(p === Infinity ? "unit ball L∞" : `unit ball L${p}`, 0, radius - 10);
+  ctx.fillText(p === Infinity ? "unit ball L∞" : `unit ball L${safeP}`, 0, radius - 10);
   ctx.restore();
+}
+
+function normalizeCustomP(value) {
+  if (value === Infinity) return value;
+  if (Math.abs(value) >= ZERO_P_GAP) return value;
+  return value < 0 ? -ZERO_P_GAP : ZERO_P_GAP;
+}
+
+function formatP(value) {
+  return Number.isInteger(value) ? `${value}` : value.toFixed(1);
 }
 
 function drawMetricDiagram(ctx, sites, metricP) {
@@ -157,15 +178,13 @@ function drawMetricDiagram(ctx, sites, metricP) {
   ctx.restore();
 }
 
-export default function MetricLab() {
-  const [sites, setSites] = useState([
-    { x: 210, y: 160 },
-    { x: 470, y: 120 },
-    { x: 650, y: 340 },
-    { x: 280, y: 390 },
-  ]);
+export default function MetricLab({ sites: controlledSites, setSites: setControlledSites } = {}) {
+  const [localSites, setLocalSites] = useState([]);
+  const sites = controlledSites ?? localSites;
+  const setSites = setControlledSites ?? setLocalSites;
   const [metric, setMetric] = useState("l2");
   const [customP, setCustomP] = useState(3);
+  const [customPInput, setCustomPInput] = useState("3");
   const canvasRef = useRef(null);
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
   const renderScale = Math.max(dpr, TARGET_RENDER_WIDTH / CANVAS_WIDTH);
@@ -173,6 +192,24 @@ export default function MetricLab() {
   const renderBufferHeight = Math.round(CANVAS_HEIGHT * renderScale);
   const selectedMetric = METRICS.find(item => item.id === metric) ?? METRICS[1];
   const metricP = selectedMetric.p ?? customP;
+
+  const commitCustomP = useCallback(value => {
+    const parsed = Number(value);
+    const normalized = Number.isFinite(parsed)
+      ? normalizeCustomP(Math.min(MAX_CUSTOM_P, Math.max(MIN_CUSTOM_P, parsed)))
+      : customP;
+    setCustomP(normalized);
+    setCustomPInput(formatP(normalized));
+  }, [customP]);
+
+  const updateCustomP = useCallback(value => {
+    setMetric("custom");
+    setCustomPInput(value);
+    if (value === "" || value === "-" || value === "." || value === "-.") return;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    setCustomP(normalizeCustomP(Math.min(MAX_CUSTOM_P, Math.max(MIN_CUSTOM_P, parsed))));
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -246,7 +283,7 @@ export default function MetricLab() {
             <span style={{color:"#64748b",fontWeight:400,fontSize:16,marginLeft:8}}>Lp Voronoi Cells</span>
           </h1>
           <p style={{color:"#64748b",fontSize:12,margin:0,fontFamily:"'JetBrains Mono',monospace"}}>
-            Click to add sites · Right-click to remove · Current metric: {selectedMetric.label === "Lp" ? `L${customP}` : selectedMetric.label}
+            Click to add sites · Right-click to remove · Current metric: {selectedMetric.label === "Lp" ? `L${formatP(customP)}` : selectedMetric.label}
           </p>
         </div>
 
@@ -272,15 +309,29 @@ export default function MetricLab() {
           <div style={{display:"flex",gap:8,background:"#ffffff",borderRadius:10,padding:"6px 14px",border:"1px solid #cbd5e1",alignItems:"center",opacity:metric === "custom" ? 1 : 0.55}}>
             <input
               type="range"
-              min={1.2}
-              max={8}
+              min={MIN_CUSTOM_P}
+              max={MAX_CUSTOM_P}
               step={0.1}
               value={customP}
-              onChange={event => setCustomP(Number(event.target.value))}
+              onChange={event => {
+                updateCustomP(event.target.value);
+                setCustomPInput(formatP(Number(event.target.value)));
+              }}
               disabled={metric !== "custom"}
               style={{width:120,accentColor:"#0d9488",cursor:metric === "custom" ? "pointer" : "default"}}
             />
-            <span style={{fontSize:10,color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>p={customP.toFixed(1)}</span>
+            <input
+              type="number"
+              min={MIN_CUSTOM_P}
+              max={MAX_CUSTOM_P}
+              step={0.1}
+              value={customPInput}
+              onChange={event => updateCustomP(event.target.value)}
+              onBlur={event => commitCustomP(event.target.value)}
+              onFocus={() => setMetric("custom")}
+              style={{width:58,border:"1px solid #cbd5e1",borderRadius:6,padding:"4px 6px",fontSize:11,color:"#334155",fontFamily:"'JetBrains Mono',monospace"}}
+            />
+            <span style={{fontSize:10,color:"#64748b",fontFamily:"'JetBrains Mono',monospace"}}>p</span>
           </div>
           <div style={{display:"flex",gap:4,background:"#ffffff",borderRadius:10,padding:4,border:"1px solid #cbd5e1",alignItems:"center"}}>
             <button onClick={addRandom} style={buttonStyle(false)}>+5</button>
@@ -290,7 +341,7 @@ export default function MetricLab() {
 
         <div style={{marginTop:16,maxWidth:CANVAS_WIDTH,width:"100%",display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:10,fontFamily:"'JetBrains Mono',monospace",fontSize:12}}>
           {[
-            ["Metric", [["Distance", selectedMetric.label === "Lp" ? `(|dx|^p + |dy|^p)^(1/p)` : selectedMetric.label], ["p", metricP === Infinity ? "infinity" : `${metricP}`], ["Sites", `${sites.length}`]]],
+            ["Metric", [["Distance", selectedMetric.label === "Lp" ? `(|dx|^p + |dy|^p)^(1/p)` : selectedMetric.label], ["p", metricP === Infinity ? "infinity" : `${metricP}`], ["Kind", metricP < 1 ? "experimental" : "metric"], ["Sites", `${sites.length}`]]],
             ["Reading Cells", [["Color", "nearest site"], ["Dark seams", "sampled boundaries"], ["Inset", "unit ball"]]],
             ["Next Step", [["Compare", "same sites, two metrics"], ["Exact edges", "Euclidean mode"], ["Lessons", "distance and bisectors"]]],
           ].map(([title, rows]) => (

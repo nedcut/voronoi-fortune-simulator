@@ -2379,8 +2379,10 @@ function StructuresSidebar({
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
-export default function VoronoiVisualizer() {
-  const [sites, setSites] = useState([]);
+export default function VoronoiVisualizer({ sites: controlledSites, setSites: setControlledSites } = {}) {
+  const [localSites, setLocalSites] = useState([]);
+  const sites = controlledSites ?? localSites;
+  const setSites = setControlledSites ?? setLocalSites;
   const [mode, setMode] = useState("place");
   const [playing, setPlaying] = useState(false);
   const [hud, setHud] = useState(() => makeHudState(null, 0));
