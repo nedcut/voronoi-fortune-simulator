@@ -485,7 +485,7 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
                 >
                   <span style={{color:colorForSite(index),fontWeight:700}}>s{index}</span>
                   <div style={{display:"grid",gap:8}}>
-                    <label style={{display:"grid",gridTemplateColumns:"42px 1fr 38px",gap:8,alignItems:"center",color:"#64748b"}}>
+                    <label style={{display:"grid",gridTemplateColumns:"42px 1fr 58px",gap:8,alignItems:"center",color:"#64748b"}}>
                       start
                       <input
                         type="range"
@@ -496,9 +496,15 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
                         onChange={event => updateControl(index, "startRadius", event.target.value)}
                         style={sliderStyle}
                       />
-                      <span style={{color:"#334155",textAlign:"right"}}>{formatNumber(control.startRadius)}</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={formatNumber(control.startRadius)}
+                        onChange={event => updateControl(index, "startRadius", event.target.value)}
+                        style={{width:58,border:"1px solid #cbd5e1",borderRadius:6,padding:"4px 6px",fontSize:11,color:"#334155",fontFamily:"'JetBrains Mono',monospace",textAlign:"right"}}
+                      />
                     </label>
-                    <label style={{display:"grid",gridTemplateColumns:"42px 1fr 38px",gap:8,alignItems:"center",color:"#64748b"}}>
+                    <label style={{display:"grid",gridTemplateColumns:"42px 1fr 58px",gap:8,alignItems:"center",color:"#64748b"}}>
                       speed
                       <input
                         type="range"
@@ -509,7 +515,13 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
                         onChange={event => updateControl(index, "speed", event.target.value)}
                         style={sliderStyle}
                       />
-                      <span style={{color:"#334155",textAlign:"right"}}>{formatNumber(control.speed)}</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={formatNumber(control.speed)}
+                        onChange={event => updateControl(index, "speed", event.target.value)}
+                        style={{width:58,border:"1px solid #cbd5e1",borderRadius:6,padding:"4px 6px",fontSize:11,color:"#334155",fontFamily:"'JetBrains Mono',monospace",textAlign:"right"}}
+                      />
                     </label>
                   </div>
                 </div>
