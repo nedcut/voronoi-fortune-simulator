@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, TARGET_RENDER_WIDTH } from "./appConstants.js";
 import { lpDistance } from "./geometry.js";
 
@@ -15,9 +15,9 @@ const METRICS = [
 ];
 
 const SAMPLE_SIZE = 4;
-const MAX_TIME = 220;
 const DEFAULT_START_RADIUS = 0;
 const DEFAULT_SPEED = 1;
+const MIN_FINISH_TIME = 80;
 
 function colorForSite(index) {
   return SITE_COLORS[index % SITE_COLORS.length];
@@ -53,6 +53,32 @@ function arrivalTime(point, site, control, p) {
   return Math.max(0, (lpDistance(point, site, p) - control.startRadius) / speed);
 }
 
+function ownerAt(point, sites, controls, p) {
+  let owner = -1;
+  let bestArrival = Infinity;
+  for (let i = 0; i < sites.length; i++) {
+    const t = arrivalTime(point, sites[i], getSiteControl(controls, i), p);
+    if (t < bestArrival) {
+      bestArrival = t;
+      owner = i;
+    }
+  }
+  return { owner, arrival: bestArrival };
+}
+
+function computeFinishTime(sites, controls, p) {
+  if (!sites.length) return MIN_FINISH_TIME;
+  let maxArrival = MIN_FINISH_TIME;
+  for (let x = 0; x < CANVAS_WIDTH; x += SAMPLE_SIZE) {
+    for (let y = 0; y < CANVAS_HEIGHT; y += SAMPLE_SIZE) {
+      const point = { x: x + SAMPLE_SIZE / 2, y: y + SAMPLE_SIZE / 2 };
+      const result = ownerAt(point, sites, controls, p);
+      if (Number.isFinite(result.arrival)) maxArrival = Math.max(maxArrival, result.arrival);
+    }
+  }
+  return Math.ceil(maxArrival + 4);
+}
+
 function unitBallPoint(theta, radius, p) {
   const cos = Math.cos(theta);
   const sin = Math.sin(theta);
@@ -86,15 +112,7 @@ function drawWavefront(ctx, sites, controls, p, time) {
     for (let x = 0; x < CANVAS_WIDTH; x += SAMPLE_SIZE) {
       for (let y = 0; y < CANVAS_HEIGHT; y += SAMPLE_SIZE) {
         const point = { x: x + SAMPLE_SIZE / 2, y: y + SAMPLE_SIZE / 2 };
-        let owner = -1;
-        let bestArrival = Infinity;
-        for (let i = 0; i < sites.length; i++) {
-          const t = arrivalTime(point, sites[i], getSiteControl(controls, i), p);
-          if (t < bestArrival) {
-            bestArrival = t;
-            owner = i;
-          }
-        }
+        const { owner, arrival: bestArrival } = ownerAt(point, sites, controls, p);
         if (owner === -1 || bestArrival > time) continue;
         const rgb = hexToRgb(colorForSite(owner));
         const freshness = Math.max(0, Math.min(1, 1 - (time - bestArrival) / 80));
@@ -112,17 +130,27 @@ function drawWavefront(ctx, sites, controls, p, time) {
       ctx.globalAlpha = 0.58;
       ctx.lineWidth = 2;
       ctx.setLineDash([7, 5]);
-      ctx.beginPath();
       const steps = 180;
+      let drawing = false;
       for (let step = 0; step <= steps; step++) {
         const point = unitBallPoint((step / steps) * Math.PI * 2, radius, p);
         const px = site.x + point.x;
         const py = site.y + point.y;
-        if (step === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
+        const inCanvas = px >= 0 && px <= CANVAS_WIDTH && py >= 0 && py <= CANVAS_HEIGHT;
+        const { owner } = ownerAt({ x: px, y: py }, sites, controls, p);
+        const visible = inCanvas && owner === i;
+        if (visible && !drawing) {
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          drawing = true;
+        } else if (visible) {
+          ctx.lineTo(px, py);
+        } else if (drawing) {
+          ctx.stroke();
+          drawing = false;
+        }
       }
-      ctx.closePath();
-      ctx.stroke();
+      if (drawing) ctx.stroke();
       ctx.restore();
     }
   }
@@ -171,6 +199,10 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   const renderBufferHeight = Math.round(CANVAS_HEIGHT * renderScale);
   const selectedMetric = METRICS.find(item => item.id === metric) ?? METRICS[1];
   const metricP = selectedMetric.p ?? customP;
+  const finishTime = useMemo(
+    () => computeFinishTime(sites, controls, metricP),
+    [sites, controls, metricP],
+  );
 
   useEffect(() => {
     setControls(current => normalizeControls(current, sites.length));
@@ -191,8 +223,8 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
       const dt = Math.min(0.05, (timestamp - previousFrame.current) / 1000);
       previousFrame.current = timestamp;
       setTime(current => {
-        const next = Math.min(MAX_TIME, current + dt * 38);
-        if (next >= MAX_TIME) setPlaying(false);
+        const next = Math.min(finishTime, current + dt * 38);
+        if (next >= finishTime) setPlaying(false);
         return next;
       });
       rafRef.current = requestAnimationFrame(tick);
@@ -203,7 +235,11 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
       previousFrame.current = 0;
       cancelAnimationFrame(rafRef.current);
     };
-  }, [playing]);
+  }, [playing, finishTime]);
+
+  useEffect(() => {
+    setTime(current => Math.min(current, finishTime));
+  }, [finishTime]);
 
   const canvasPoint = useCallback(event => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -339,7 +375,7 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
             <input
               type="range"
               min={0}
-              max={MAX_TIME}
+              max={finishTime}
               step={0.5}
               value={time}
               onChange={event => {
