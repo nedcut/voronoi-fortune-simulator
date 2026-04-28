@@ -164,6 +164,7 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   const previousFrame = useRef(0);
   const canvasRef = useRef(null);
   const rafRef = useRef(null);
+  const dragging = useRef(null);
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
   const renderScale = Math.max(dpr, TARGET_RENDER_WIDTH / CANVAS_WIDTH);
   const renderBufferWidth = Math.round(CANVAS_WIDTH * renderScale);
@@ -213,10 +214,14 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
   }, []);
 
   const addSite = useCallback(event => {
+    if (dragging.current?.moved) return;
     const point = canvasPoint(event);
     if (point.x < 5 || point.x > CANVAS_WIDTH - 5 || point.y < 5 || point.y > CANVAS_HEIGHT - 5) return;
+    for (const site of sites) {
+      if (lpDistance(point, site, 2) < 15) return;
+    }
     setSites(current => [...current, point]);
-  }, [canvasPoint, setSites]);
+  }, [canvasPoint, sites, setSites]);
 
   const removeSite = useCallback(event => {
     event.preventDefault();
@@ -234,6 +239,38 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
       return best === -1 ? current : current.filter((_, index) => index !== best);
     });
   }, [canvasPoint, setSites]);
+
+  const startDragSite = useCallback(event => {
+    if (event.button !== 0) return;
+    const point = canvasPoint(event);
+    for (let i = 0; i < sites.length; i++) {
+      if (lpDistance(point, sites[i], 2) < 15) {
+        dragging.current = { index: i, startX: point.x, startY: point.y, moved: false };
+        return;
+      }
+    }
+    dragging.current = null;
+  }, [canvasPoint, sites]);
+
+  const dragSite = useCallback(event => {
+    const current = dragging.current;
+    if (!current) return;
+    const point = canvasPoint(event);
+    const x = Math.max(5, Math.min(CANVAS_WIDTH - 5, point.x));
+    const y = Math.max(5, Math.min(CANVAS_HEIGHT - 5, point.y));
+    if (!current.moved && lpDistance({ x, y }, { x: current.startX, y: current.startY }, 2) < 3) return;
+    current.moved = true;
+    setSites(sites => {
+      if (!sites[current.index]) return sites;
+      const next = [...sites];
+      next[current.index] = { x, y };
+      return next;
+    });
+  }, [canvasPoint, setSites]);
+
+  const endDragSite = useCallback(() => {
+    if (dragging.current) setTimeout(() => { dragging.current = null; }, 0);
+  }, []);
 
   const updateControl = useCallback((siteIndex, key, value) => {
     const parsed = Number(value);
@@ -283,7 +320,11 @@ export default function WavefrontLab({ sites: controlledSites, setSites: setCont
             height={renderBufferHeight}
             onClick={addSite}
             onContextMenu={removeSite}
-            style={{width:`min(${CANVAS_WIDTH}px,calc(100vw - 32px))`,height:"auto",cursor:"crosshair",display:"block"}}
+            onMouseDown={startDragSite}
+            onMouseMove={dragSite}
+            onMouseUp={endDragSite}
+            onMouseLeave={endDragSite}
+            style={{width:`min(${CANVAS_WIDTH}px,calc(100vw - 32px))`,height:"auto",cursor:dragging.current ? "grabbing" : "crosshair",display:"block"}}
           />
         </div>
 
