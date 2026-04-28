@@ -88,8 +88,8 @@ This checklist tracks the path from the current Fortune sweep visualizer to a br
 
 ## First Slice
 
-- [ ] Create small geometry helper modules without changing behavior.
-- [ ] Move canvas constants and shared distance functions out of the React component.
-- [ ] Add a diagram mode registry with the current Fortune visualizer as the first mode.
-- [ ] Add a Metric Lab placeholder route or mode behind the same canvas shell.
-- [ ] Verify with `bun run build`.
+- [x] Create small geometry helper modules without changing behavior.
+- [x] Move canvas constants and shared distance functions out of the React component.
+- [x] Add a diagram mode registry with the current Fortune visualizer as the first mode.
+- [x] Add a Metric Lab mode behind the same app shell.
+- [x] Verify with `bun run build`.

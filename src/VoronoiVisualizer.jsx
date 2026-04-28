@@ -3,6 +3,7 @@ import {
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
   COARSE_SCRUB_STEP,
+  DOCKED_SIDEBAR_BREAKPOINT,
   FINE_SCRUB_STEP,
   TARGET_RENDER_WIDTH,
 } from "./appConstants.js";
@@ -2389,7 +2390,9 @@ export default function VoronoiVisualizer() {
   const [showCircles, setShowCircles] = useState(true);
   const [showEdges, setShowEdges] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
-  const [showPanel, setShowPanel] = useState(true);
+  const [showPanel, setShowPanel] = useState(() =>
+    typeof window === "undefined" ? true : window.innerWidth >= DOCKED_SIDEBAR_BREAKPOINT
+  );
   const [panelExpanded, setPanelExpanded] = useState({ dcel:false, queue:false, beach:true });
   const [panelData, setPanelData] = useState({ dcel:null, queue:null, beach:null });
   const [hoveredSidebarFocus, setHoveredSidebarFocus] = useState(null);
@@ -2410,7 +2413,7 @@ export default function VoronoiVisualizer() {
   const pinnedBeachNodeIds = pinnedSidebarFocuses
     .filter(focus => focus.kind === "beach-node")
     .map(focus => focus.id);
-  const isDockedSidebar = showPanel && viewportWidth >= 1320;
+  const isDockedSidebar = showPanel && viewportWidth >= DOCKED_SIDEBAR_BREAKPOINT;
   const isDrawerSidebar = showPanel && !isDockedSidebar;
   const dockedSidebarWidth = clamp(Math.round(viewportWidth * 0.3), 430, 500);
   const drawerSidebarWidth = Math.min(480, Math.max(340, viewportWidth - 20));
